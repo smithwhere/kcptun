@@ -730,10 +730,9 @@ func (s *UDPSession) postProcess() {
 			// transmit when chPostProcessing is empty or we've reached max batch size
 			if len(s.chPostProcessing) == 0 || len(txqueue) >= maxBatchSize {
 				if limiter, ok := s.rateLimiter.Load().(*rate.Limiter); ok {
-					err := limiter.WaitN(ctx, bytesToSend)
-					if err != nil {
-						panic(err)
-					}
+					// WaitN only returns error if the limiter is misconfigured
+					// or context is cancelled. In either case, we continue sending.
+					_ = limiter.WaitN(ctx, bytesToSend)
 				}
 				s.tx(txqueue)
 				s.kcp.debugLog(IKCP_LOG_OUTPUT, "conv", s.kcp.conv, "datalen", bytesToSend)
@@ -1076,10 +1075,9 @@ type (
 		conn         net.PacketConn // the underlying packet connection
 		ownConn      bool           // true if we created conn internally, false if provided by caller
 
-		sessions        map[string]*UDPSession // all sessions accepted by this Listener
-		sessionLock     sync.RWMutex
-		chAccepts       chan *UDPSession // Listen() backlog
-		chSessionClosed chan net.Addr    // session close queue
+		sessions    map[string]*UDPSession // all sessions accepted by this Listener
+		sessionLock sync.RWMutex
+		chAccepts   chan *UDPSession // Listen() backlog
 
 		die     chan struct{} // notify the listener has closed
 		dieOnce sync.Once
@@ -1402,7 +1400,6 @@ func serveConn(block BlockCrypt, dataShards, parityShards int, conn net.PacketCo
 	l.ownConn = ownConn
 	l.sessions = make(map[string]*UDPSession)
 	l.chAccepts = make(chan *UDPSession, acceptBacklog)
-	l.chSessionClosed = make(chan net.Addr)
 	l.die = make(chan struct{})
 	l.dataShards = dataShards
 	l.parityShards = parityShards
