@@ -43,10 +43,11 @@ jobs:
         with:
           go-version: '1.24.0'
 
-      - name: Fix Go module and update vendor
+      - name: Clean and update dependencies
         run: |
+          rm -rf vendor/
           go mod tidy
-          go mod vendor
+          go mod download
 
       - name: Build binaries
         env:
@@ -67,8 +68,8 @@ jobs:
           fi
           
           echo "Building for ${{ matrix.goos }}/${SUFFIX}..."
-          go build -mod=vendor -ldflags="-s -w -X main.VERSION=$(date -u +%Y%m%d)" -o client_${{ matrix.goos }}_${SUFFIX}${EXT} ./client
-          go build -mod=vendor -ldflags="-s -w -X main.VERSION=$(date -u +%Y%m%d)" -o server_${{ matrix.goos }}_${SUFFIX}${EXT} ./server
+          go build -ldflags="-s -w -X main.VERSION=$(date -u +%Y%m%d)" -o client_${{ matrix.goos }}_${SUFFIX}${EXT} ./client
+          go build -ldflags="-s -w -X main.VERSION=$(date -u +%Y%m%d)" -o server_${{ matrix.goos }}_${SUFFIX}${EXT} ./server
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
