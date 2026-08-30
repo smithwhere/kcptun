@@ -26,8 +26,12 @@ jobs:
           - goos: linux
             goarch: arm
             goarm: 7
+          - goos: linux
+            goarch: 386
           - goos: windows
             goarch: amd64
+          - goos: windows
+            goarch: arm64
           - goos: freebsd
             goarch: amd64
 
@@ -39,7 +43,7 @@ jobs:
         with:
           go-version: '1.24.0'
 
-      - name: Build
+      - name: Build binaries
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -47,14 +51,24 @@ jobs:
           CGO_ENABLED: 0
         run: |
           EXT=""
-          if [ "${{ matrix.goos }}" == "windows" ]; then EXT=".exe"; fi
-          go build -ldflags="-s -w" -o client_${{ matrix.goos }}_${{ matrix.goarch }}$EXT ./client
-          go build -ldflags="-s -w" -o server_${{ matrix.goos }}_${{ matrix.goarch }}$EXT ./server
+          SUFFIX="${{ matrix.goarch }}"
+          
+          if [ ! -z "${{ matrix.goarm }}" ]; then
+            SUFFIX="${{ matrix.goarch }}${{ matrix.goarm }}"
+          fi
+          
+          if [ "${{ matrix.goos }}" == "windows" ]; then 
+            EXT=".exe"
+          fi
+          
+          echo "Building for ${{ matrix.goos }}/${SUFFIX}..."
+          go build -ldflags="-s -w -X main.VERSION=$(date -u +%Y%m%d)" -o client_${{ matrix.goos }}_${SUFFIX}${EXT} ./client
+          go build -ldflags="-s -w -X main.VERSION=$(date -u +%Y%m%d)" -o server_${{ matrix.goos }}_${SUFFIX}${EXT} ./server
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm }}
           path: |
             client_*
             server_*
@@ -66,19 +80,32 @@ jobs:
     
     steps:
       - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
       - name: Create Release Assets
         run: |
           mkdir -p release
+          cd artifacts
           for dir in binaries-*/; do
             cd "$dir"
-            tar -czf ../release/kcptun-${dir%/}.tar.gz *
+            tar -czf "../../release/kcptun-${dir%/}.tar.gz" *
             cd ..
           done
+          cd ..
+          ls -la release/
+
+      - name: Generate SHA1 checksums
+        run: |
+          cd release
+          sha1sum *.tar.gz > SHA1SUMS
+          cat SHA1SUMS
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
         with:
-          files: release/*.tar.gz
+          files: |
+            release/*.tar.gz
+            release/SHA1SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
