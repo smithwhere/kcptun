@@ -43,9 +43,11 @@ jobs:
         with:
           go-version: '1.24.0'
 
-      - name: Clean and update dependencies
+      - name: Clean vendor and dependencies
         run: |
           rm -rf vendor/
+          rm -f go.sum
+          go clean -modcache
           go mod tidy
           go mod download
 
