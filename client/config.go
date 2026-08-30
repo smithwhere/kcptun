@@ -23,7 +23,7 @@
 package main
 
 import (
-	"github.com/xtaci/kcptun/std"
+	"github.com/smithwhere/kcptun/std"
 )
 
 // Config models the client-side configuration loaded via flags or JSON.
