@@ -9,9 +9,8 @@ RUN apk add git
 WORKDIR /workspace
 COPY . .
 RUN go mod download
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=${TARGETVARIANT#v} \
+RUN export CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=${TARGETVARIANT#v} && \
 	go build -mod=readonly -trimpath -ldflags "-X main.VERSION=$(date -u +%Y%m%d) -s -w" -o /client ./client && \
-	CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=${TARGETVARIANT#v} \
 	go build -mod=readonly -trimpath -ldflags "-X main.VERSION=$(date -u +%Y%m%d) -s -w" -o /server ./server
 
 FROM alpine:3.18
