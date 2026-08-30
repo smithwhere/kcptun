@@ -7,7 +7,7 @@ WORKDIR /workspace
 COPY . .
 RUN go mod download
 RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags "-X main.VERSION=$(date -u +%Y%m%d) -s -w" -o /client ./client && \
-	go build -mod=readonly -trimpath -ldflags "-X main.VERSION=$(date -u +%Y%m%d) -s -w" -o /server ./server
+	CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags "-X main.VERSION=$(date -u +%Y%m%d) -s -w" -o /server ./server
 
 FROM alpine:3.18
 RUN apk add --no-cache iptables
