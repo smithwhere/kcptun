@@ -29,8 +29,8 @@ TARGETS=(
 )
 
 # Full Go package import paths
-CLIENT_SRC="github.com/xtaci/kcptun/client"
-SERVER_SRC="github.com/xtaci/kcptun/server"
+CLIENT_SRC="github.com/smithwhere/kcptun/client"
+SERVER_SRC="github.com/smithwhere/kcptun/server"
 
 # Build output directory
 BUILD_DIR="$(pwd)/build"
@@ -40,13 +40,13 @@ VERSION=$(date -u +%Y%m%d)
 LDFLAGS="-X main.VERSION=${VERSION} -s -w"
 
 # --- Tool Check ---
-# Determine the SHA checksum utility (sha1sum or shasum)
-if command -v sha1sum &> /dev/null; then
-    SUM_TOOL="sha1sum"
+# Determine the SHA checksum utility (sha256sum or shasum)
+if command -v sha256sum &> /dev/null; then
+    SUM_TOOL="sha256sum"
 elif command -v shasum &> /dev/null; then
-    SUM_TOOL="shasum"
+    SUM_TOOL="shasum -a 256"
 else
-    echo "Error: Neither 'sha1sum' nor 'shasum' tool found."
+    echo "Error: Neither 'sha256sum' nor 'shasum' tool found."
     exit 1
 fi
 
@@ -169,13 +169,13 @@ done
 echo "--- Cleaning intermediate binaries ---"
 find "${BUILD_DIR}" -type f -regex "${BUILD_DIR}/\(client\|server\)_.*" -delete
 
-# 4. Generate SHA1 checksums file
-echo "--- Generating SHA1 Checksums ---"
-(cd "${BUILD_DIR}" && $SUM_TOOL *.tar.gz > SHA1SUMS)
+# 4. Generate SHA256 checksums file
+echo "--- Generating SHA256 Checksums ---"
+(cd "${BUILD_DIR}" && $SUM_TOOL *.tar.gz > SHA256SUMS)
 
 # 5. Output checksums to console 
-echo "--- SHA1SUMS Output ---"
-cat "${BUILD_DIR}/SHA1SUMS"
+echo "--- SHA256SUMS Output ---"
+cat "${BUILD_DIR}/SHA256SUMS"
 echo "---"
 
 echo "--- Build Complete ---"
