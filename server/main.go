@@ -40,7 +40,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/urfave/cli"
 	kcp "github.com/xtaci/kcp-go/v5"
-	"github.com/xtaci/kcptun/std"
+	"github.com/smithwhere/kcptun/std"
 	"github.com/xtaci/qpp"
 	"github.com/xtaci/smux"
 	"github.com/xtaci/tcpraw"

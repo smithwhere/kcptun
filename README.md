@@ -3,7 +3,8 @@
 > ⚠️ **Project Status Notice**
 >
 > This project is archived and no longer maintained.  
-> No binaries are provided.  
+> Upstream does not provide binaries.  
+> 本仓库（fork）会在 GitHub Releases 提供自动构建二进制。  
 > This repository is for research and reference purposes only.
 
 [![Powered][17]][18] [![MIT licensed][11]][12] [![Build Status][3]][4] [![Go Report Card][5]][6]
@@ -17,10 +18,10 @@
 [6]: https://goreportcard.com/report/github.com/xtaci/kcptun
 [11]: https://img.shields.io/github/license/xtaci/kcptun
 [12]: LICENSE.md
-[13]: https://img.shields.io/github/v/release/xtaci/kcptun?color=orange
-[14]: https://github.com/xtaci/kcptun/releases/latest
-[15]: https://img.shields.io/github/downloads/xtaci/kcptun/total.svg?maxAge=1800&color=orange
-[16]: https://github.com/xtaci/kcptun/releases
+[13]: https://img.shields.io/github/v/release/smithwhere/kcptun?color=orange
+[14]: https://github.com/smithwhere/kcptun/releases/latest
+[15]: https://img.shields.io/github/downloads/smithwhere/kcptun/total.svg?maxAge=1800&color=orange
+[16]: https://github.com/smithwhere/kcptun/releases
 [17]: https://img.shields.io/badge/KCP-Powered-blue.svg
 [18]: https://github.com/skywind3000/kcp
 
@@ -43,6 +44,7 @@
 
 - [Requirements](#requirements)
 - [QuickStart](#quickstart)
+- [Prebuilt binaries / 预编译二进制](#prebuilt-binaries--预编译二进制)
 - [Building from source](#building-from-source)
 - [Performance](#performance)
 - [Basic Tuning Guide](#basic-tuning-guide)
@@ -113,10 +115,16 @@ which relays the original connection:
 
 **_OR START WITH THESE COMPLETE CONFIGURATION FILES:_** [client](https://github.com/xtaci/kcptun/blob/master/dist/local.json.example) --> [server](https://github.com/xtaci/kcptun/blob/master/dist/server.json.example)
 
+## Prebuilt binaries / 预编译二进制
+
+- Download / 下载: https://github.com/smithwhere/kcptun/releases
+- Tag a version like `v20260830` to trigger automatic cross-platform builds and release assets.
+- 创建如 `v20260830` 的标签后，GitHub Actions 会自动构建跨平台压缩包并上传到对应 Release。
+
 ## Building from source
 
 ```
-$ git clone https://github.com/xtaci/kcptun.git
+$ git clone https://github.com/smithwhere/kcptun.git
 $ cd kcptun
 $ ./build-release.sh
 $ cd build

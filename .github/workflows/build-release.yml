@@ -1,0 +1,164 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm_suffix }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+            goarm: ''
+            goarm_suffix: ''
+          - goos: darwin
+            goarch: arm64
+            goarm: ''
+            goarm_suffix: ''
+          - goos: freebsd
+            goarch: amd64
+            goarm: ''
+            goarm_suffix: ''
+          - goos: linux
+            goarch: 386
+            goarm: ''
+            goarm_suffix: ''
+          - goos: linux
+            goarch: amd64
+            goarm: ''
+            goarm_suffix: ''
+          - goos: linux
+            goarch: arm
+            goarm: '7'
+            goarm_suffix: 'v7'
+          - goos: linux
+            goarch: arm64
+            goarm: ''
+            goarm_suffix: ''
+          - goos: windows
+            goarch: amd64
+            goarm: ''
+            goarm_suffix: ''
+          - goos: windows
+            goarch: arm64
+            goarm: ''
+            goarm_suffix: ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache: true
+
+      - name: Resolve dependencies
+        run: go mod download
+
+      - name: Prepare build metadata
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="dev-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build and package
+        shell: bash
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          set -euo pipefail
+
+          ext=''
+          if [[ "${GOOS}" == 'windows' ]]; then
+            ext='.exe'
+          fi
+
+          target="${GOOS}-${GOARCH}${{ matrix.goarm_suffix }}"
+          outdir="dist/${target}"
+          mkdir -p "${outdir}"
+
+          client_bin="client_${GOOS}_${GOARCH}${{ matrix.goarm_suffix }}${ext}"
+          server_bin="server_${GOOS}_${GOARCH}${{ matrix.goarm_suffix }}${ext}"
+
+          ldflags="-s -w -X main.VERSION=${VERSION}"
+          go build -mod=readonly -trimpath -ldflags "${ldflags}" -o "${outdir}/${client_bin}" ./client
+          go build -mod=readonly -trimpath -ldflags "${ldflags}" -o "${outdir}/${server_bin}" ./server
+
+          archive="kcptun_${VERSION}_${target}.tar.gz"
+          tar -C "${outdir}" -czf "dist/${archive}" "${client_bin}" "${server_bin}"
+          echo "ARCHIVE=dist/${archive}" >> "$GITHUB_ENV"
+          echo "VERIFY_CLIENT=${client_bin}" >> "$GITHUB_ENV"
+          echo "VERIFY_SERVER=${server_bin}" >> "$GITHUB_ENV"
+
+      - name: Verify linux/amd64 binaries
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          set -euo pipefail
+          verify_dir="$(mktemp -d)"
+          tar -xzf "${ARCHIVE}" -C "${verify_dir}"
+          "${verify_dir}/${VERIFY_CLIENT}" --version
+          "${verify_dir}/${VERIFY_SERVER}" --version
+
+      - name: Verify package exists for cross targets
+        if: ${{ !(matrix.goos == 'linux' && matrix.goarch == 'amd64') }}
+        run: |
+          set -euo pipefail
+          test -s "${ARCHIVE}"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm_suffix }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  release:
+    name: publish-release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+
+      - name: Collect archives and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release/assets
+          find release -mindepth 2 -type f -name '*.tar.gz' -exec cp {} release/assets/ \;
+          cd release/assets
+          sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          files: |
+            release/assets/*.tar.gz
+            release/assets/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
