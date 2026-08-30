@@ -100,20 +100,23 @@ jobs:
           server_bin="server_${GOOS}_${GOARCH}${{ matrix.goarm_suffix }}${ext}"
 
           ldflags="-s -w -X main.VERSION=${VERSION}"
-          go build -mod=mod -trimpath -ldflags "${ldflags}" -o "${outdir}/${client_bin}" ./client
-          go build -mod=mod -trimpath -ldflags "${ldflags}" -o "${outdir}/${server_bin}" ./server
+          go build -mod=readonly -trimpath -ldflags "${ldflags}" -o "${outdir}/${client_bin}" ./client
+          go build -mod=readonly -trimpath -ldflags "${ldflags}" -o "${outdir}/${server_bin}" ./server
 
           archive="kcptun_${VERSION}_${target}.tar.gz"
           tar -C "${outdir}" -czf "dist/${archive}" "${client_bin}" "${server_bin}"
           echo "ARCHIVE=dist/${archive}" >> "$GITHUB_ENV"
+          echo "VERIFY_CLIENT=${client_bin}" >> "$GITHUB_ENV"
+          echo "VERIFY_SERVER=${server_bin}" >> "$GITHUB_ENV"
 
       - name: Verify linux/amd64 binaries
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: |
           set -euo pipefail
-          tar -xzf "${ARCHIVE}" -C /tmp
-          /tmp/client_linux_amd64 --version
-          /tmp/server_linux_amd64 --version
+          verify_dir="$(mktemp -d)"
+          tar -xzf "${ARCHIVE}" -C "${verify_dir}"
+          "${verify_dir}/${VERIFY_CLIENT}" --version
+          "${verify_dir}/${VERIFY_SERVER}" --version
 
       - name: Verify package exists for cross targets
         if: ${{ !(matrix.goos == 'linux' && matrix.goarch == 'amd64') }}
@@ -144,7 +147,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release/assets
-          find release -type f -name '*.tar.gz' -exec cp {} release/assets/ \;
+          find release -mindepth 2 -type f -name '*.tar.gz' -exec cp {} release/assets/ \;
           cd release/assets
           sha256sum *.tar.gz > SHA256SUMS
 
