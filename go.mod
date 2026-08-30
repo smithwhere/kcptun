@@ -27,7 +27,4 @@ require (
 	golang.org/x/time v0.14.0 // indirect
 )
 
-// replace github.com/xtaci/smux => /home/xtaci/go/src/github.com/xtaci/smux
-//replace github.com/xtaci/kcp-go/v5 => /home/xtaci/go/src/github.com/xtaci/kcp-go
-
 go 1.24.0

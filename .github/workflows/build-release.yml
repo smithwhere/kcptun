@@ -62,10 +62,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.24.x'
-          cache: true
-
-      - name: Resolve dependencies
-        run: go mod download
+          cache: false
 
       - name: Prepare build metadata
         shell: bash
@@ -100,8 +97,8 @@ jobs:
           server_bin="server_${GOOS}_${GOARCH}${{ matrix.goarm_suffix }}${ext}"
 
           ldflags="-s -w -X main.VERSION=${VERSION}"
-          go build -mod=readonly -trimpath -ldflags "${ldflags}" -o "${outdir}/${client_bin}" ./client
-          go build -mod=readonly -trimpath -ldflags "${ldflags}" -o "${outdir}/${server_bin}" ./server
+          go build -mod=vendor -trimpath -ldflags "${ldflags}" -o "${outdir}/${client_bin}" ./client
+          go build -mod=vendor -trimpath -ldflags "${ldflags}" -o "${outdir}/${server_bin}" ./server
 
           archive="kcptun_${VERSION}_${target}.tar.gz"
           tar -C "${outdir}" -czf "dist/${archive}" "${client_bin}" "${server_bin}"

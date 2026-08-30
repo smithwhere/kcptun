@@ -123,11 +123,33 @@ which relays the original connection:
 
 ## Building from source
 
+Requirements: Go 1.24+. No CGO is needed; all dependencies are vendored.
+
+```bash
+# Clone the repository
+git clone https://github.com/smithwhere/kcptun.git
+cd kcptun
+
+# Run tests
+go test -mod=vendor ./...
+
+# Build client and server binaries for the current platform
+go build -mod=vendor -o client_bin ./client
+go build -mod=vendor -o server_bin ./server
+
+# Cross-compile all release targets (output goes to build/)
+./build-release.sh
+ls build/
 ```
-$ git clone https://github.com/smithwhere/kcptun.git
-$ cd kcptun
-$ ./build-release.sh
-$ cd build
+
+### Releasing a new version
+
+Tag the commit with a `v`-prefixed tag and push it. GitHub Actions will build
+all cross-platform archives and publish them to a GitHub Release automatically:
+
+```bash
+git tag v20260830
+git push origin v20260830
 ```
 
 ## Performance
