@@ -5,8 +5,9 @@ ENV GO111MODULE=on
 RUN apk add git
 WORKDIR /workspace
 COPY . .
-RUN go build -ldflags "-X main.VERSION=$(date -u +%Y%m%d) -s -w" -o /client github.com/smithwhere/kcptun/client && \
-	go build -ldflags "-X main.VERSION=$(date -u +%Y%m%d) -s -w" -o /server github.com/smithwhere/kcptun/server
+RUN go mod download
+RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags "-X main.VERSION=$(date -u +%Y%m%d) -s -w" -o /client ./client && \
+	go build -mod=readonly -trimpath -ldflags "-X main.VERSION=$(date -u +%Y%m%d) -s -w" -o /server ./server
 
 FROM alpine:3.18
 RUN apk add --no-cache iptables
