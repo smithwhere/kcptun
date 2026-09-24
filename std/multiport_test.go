@@ -35,6 +35,7 @@ func TestParseMultiPortValid(t *testing.T) {
 		{name: "SinglePort", addr: "example.com:2000", host: "example.com", min: 2000, max: 2000},
 		{name: "Range", addr: "example.com:2000-2005", host: "example.com", min: 2000, max: 2005},
 		{name: "IPv4Range", addr: "0.0.0.0:1-65535", host: "0.0.0.0", min: 1, max: 65535},
+		{name: "IPv6Range", addr: "[::1]:2000-2005", host: "[::1]", min: 2000, max: 2005},
 	}
 
 	for _, tt := range tests {
@@ -65,6 +66,10 @@ func TestParseMultiPortInvalid(t *testing.T) {
 		{name: "PortTooLarge", addr: "example.com:70000"},
 		{name: "MaxLessThanMin", addr: "example.com:3000-2000"},
 		{name: "HighRange", addr: "example.com:65534-70000"},
+		{name: "TrailingCharacters", addr: "example.com:2000garbage"},
+		{name: "PortTooManyDigits", addr: "example.com:123456"},
+		{name: "MissingRangeEnd", addr: "example.com:2000-"},
+		{name: "ExtraRangeSeparator", addr: "example.com:2000-2005-3000"},
 	}
 
 	for _, tt := range tests {
@@ -75,3 +80,4 @@ func TestParseMultiPortInvalid(t *testing.T) {
 		})
 	}
 }
+
