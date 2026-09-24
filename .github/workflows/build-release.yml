@@ -21,38 +21,77 @@ jobs:
             goarch: amd64
             goarm: ''
             goarm_suffix: ''
+            gomips: ''
           - goos: darwin
             goarch: arm64
             goarm: ''
             goarm_suffix: ''
+            gomips: ''
           - goos: freebsd
             goarch: amd64
             goarm: ''
             goarm_suffix: ''
+            gomips: ''
           - goos: linux
             goarch: 386
             goarm: ''
             goarm_suffix: ''
+            gomips: ''
           - goos: linux
             goarch: amd64
             goarm: ''
             goarm_suffix: ''
+            gomips: ''
+          - goos: linux
+            goarch: arm
+            goarm: '5'
+            goarm_suffix: '5'
+            gomips: ''
+          - goos: linux
+            goarch: arm
+            goarm: '6'
+            goarm_suffix: '6'
+            gomips: ''
           - goos: linux
             goarch: arm
             goarm: '7'
-            goarm_suffix: 'v7'
+            goarm_suffix: '7'
+            gomips: ''
           - goos: linux
             goarch: arm64
             goarm: ''
             goarm_suffix: ''
+            gomips: ''
+          - goos: linux
+            goarch: loong64
+            goarm: ''
+            goarm_suffix: ''
+            gomips: ''
+          - goos: linux
+            goarch: mips
+            goarm: ''
+            goarm_suffix: ''
+            gomips: softfloat
+          - goos: linux
+            goarch: mipsle
+            goarm: ''
+            goarm_suffix: ''
+            gomips: softfloat
+          - goos: windows
+            goarch: 386
+            goarm: ''
+            goarm_suffix: ''
+            gomips: ''
           - goos: windows
             goarch: amd64
             goarm: ''
             goarm_suffix: ''
+            gomips: ''
           - goos: windows
             goarch: arm64
             goarm: ''
             goarm_suffix: ''
+            gomips: ''
 
     steps:
       - name: Checkout
@@ -61,19 +100,16 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.x'
+          go-version: '1.24.13'
           cache: true
-
-      - name: Resolve dependencies
-        run: go mod download
 
       - name: Prepare build metadata
         shell: bash
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            VERSION="${GITHUB_REF_NAME}"
+            VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="dev-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+            VERSION="$(date -u +%Y%m%d)"
           fi
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
 
@@ -84,6 +120,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
         run: |
           set -euo pipefail
 
@@ -99,11 +136,11 @@ jobs:
           client_bin="client_${GOOS}_${GOARCH}${{ matrix.goarm_suffix }}${ext}"
           server_bin="server_${GOOS}_${GOARCH}${{ matrix.goarm_suffix }}${ext}"
 
-          ldflags="-s -w -X main.VERSION=${VERSION}"
-          go build -mod=readonly -trimpath -ldflags "${ldflags}" -o "${outdir}/${client_bin}" ./client
-          go build -mod=readonly -trimpath -ldflags "${ldflags}" -o "${outdir}/${server_bin}" ./server
+          ldflags="-X main.VERSION=${VERSION} -s -w"
+          go build -mod=vendor -ldflags "${ldflags}" -o "${outdir}/${client_bin}" github.com/smithwhere/kcptun/client
+          go build -mod=vendor -ldflags "${ldflags}" -o "${outdir}/${server_bin}" github.com/smithwhere/kcptun/server
 
-          archive="kcptun_${VERSION}_${target}.tar.gz"
+          archive="kcptun-${target}-${VERSION}.tar.gz"
           tar -C "${outdir}" -czf "dist/${archive}" "${client_bin}" "${server_bin}"
           echo "ARCHIVE=dist/${archive}" >> "$GITHUB_ENV"
           echo "VERIFY_CLIENT=${client_bin}" >> "$GITHUB_ENV"
@@ -113,10 +150,15 @@ jobs:
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: |
           set -euo pipefail
+          go test -mod=vendor ./...
           verify_dir="$(mktemp -d)"
           tar -xzf "${ARCHIVE}" -C "${verify_dir}"
           "${verify_dir}/${VERIFY_CLIENT}" --version
           "${verify_dir}/${VERIFY_SERVER}" --version
+          client_help="$("${verify_dir}/${VERIFY_CLIENT}" --help 2>&1)"
+          server_help="$("${verify_dir}/${VERIFY_SERVER}" --help 2>&1)"
+          grep -Eq -- '--smuxver value.*default: 1' <<< "${client_help}"
+          grep -Eq -- '--smuxver value.*default: 1' <<< "${server_help}"
 
       - name: Verify package exists for cross targets
         if: ${{ !(matrix.goos == 'linux' && matrix.goarch == 'amd64') }}
