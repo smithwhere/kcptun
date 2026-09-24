@@ -242,7 +242,7 @@ GLOBAL OPTIONS:
    --dscp value                     set DSCP(6bit) (default: 0)
    --nocomp                         disable compression
    --sockbuf value                  per-socket buffer in bytes (default: 4194304)
-   --smuxver value                  specify smux version, available 1,2 (default: 2)
+   --smuxver value                  specify smux version, available 1,2 (default: 1)
    --smuxbuf value                  the overall de-mux buffer in bytes (default: 4194304)
    --framesize value                smux max frame size (default: 8192)
    --streambuf value                per stream receive buffer in bytes, smux v2+ (default: 2097152)
@@ -288,7 +288,7 @@ GLOBAL OPTIONS:
    --dscp value                     set DSCP(6bit) (default: 0)
    --nocomp                         disable compression
    --sockbuf value                  per-socket buffer in bytes (default: 4194304)
-   --smuxver value                  specify smux version, available 1,2 (default: 2)
+   --smuxver value                  specify smux version, available 1,2 (default: 1)
    --smuxbuf value                  the overall de-mux buffer in bytes (default: 4194304)
    --framesize value                smux max frame size (default: 8192)
    --streambuf value                per stream receive buffer in bytes, smux v2+ (default: 2097152)

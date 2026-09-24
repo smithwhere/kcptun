@@ -38,9 +38,9 @@ import (
 	"golang.org/x/crypto/pbkdf2"
 
 	"github.com/fatih/color"
+	"github.com/smithwhere/kcptun/std"
 	"github.com/urfave/cli"
 	kcp "github.com/xtaci/kcp-go/v5"
-	"github.com/smithwhere/kcptun/std"
 	"github.com/xtaci/qpp"
 	"github.com/xtaci/smux"
 	"github.com/xtaci/tcpraw"
@@ -52,6 +52,14 @@ const (
 	// maxSmuxVer guards against negotiating unsupported smux protocol versions.
 	maxSmuxVer = 2
 )
+
+func smuxVersionFlag() cli.IntFlag {
+	return cli.IntFlag{
+		Name:  "smuxver",
+		Value: 1,
+		Usage: "specify smux version, available 1,2",
+	}
+}
 
 const (
 	TGT_UNIX = iota
@@ -177,11 +185,7 @@ func main() {
 			Value: 4194304, // default socket buffer size in bytes
 			Usage: "per-socket buffer in bytes",
 		},
-		cli.IntFlag{
-			Name:  "smuxver",
-			Value: 2,
-			Usage: "specify smux version, available 1,2",
-		},
+		smuxVersionFlag(),
 		cli.IntFlag{
 			Name:  "smuxbuf",
 			Value: 4194304,
