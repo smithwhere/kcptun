@@ -23,14 +23,11 @@
 package std
 
 import (
-	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/pkg/errors"
 )
-
-// remoteAddrMatcher is pre-compiled to avoid regex compilation overhead on each call.
-var remoteAddrMatcher = regexp.MustCompile(`(.*)\:([0-9]{1,5})-?([0-9]{1,5})?`)
 
 type MultiPort struct {
 	Host    string
@@ -40,35 +37,53 @@ type MultiPort struct {
 
 // ParseMultiPort parses a multiport listener or dialer address.
 func ParseMultiPort(addr string) (*MultiPort, error) {
-	matches := remoteAddrMatcher.FindStringSubmatch(addr)
+	separator := strings.LastIndexByte(addr, ':')
+	if separator < 0 {
+		return nil, errors.Errorf("malformed address:%v", addr)
+	}
 
-	if len(matches) >= 4 {
-		var minPort, maxPort int
-		minPort, err := strconv.Atoi(matches[2])
+	host := addr[:separator]
+	portSpec := addr[separator+1:]
+	if portSpec == "" {
+		return nil, errors.Errorf("malformed address:%v", addr)
+	}
+
+	// A colon in the host is valid only for bracketed IPv6 addresses. This
+	// avoids treating an unbracketed IPv6 address as a host plus a port.
+	if strings.Contains(host, ":") && !(strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]")) {
+		return nil, errors.Errorf("malformed address:%v", addr)
+	}
+
+	parts := strings.Split(portSpec, "-")
+	if len(parts) < 1 || len(parts) > 2 || parts[0] == "" || (len(parts) == 2 && parts[1] == "") {
+		return nil, errors.Errorf("malformed address:%v", addr)
+	}
+
+	parsePort := func(value string) (uint64, error) {
+		port, err := strconv.ParseUint(value, 10, 16)
+		if err != nil || port == 0 {
+			return 0, errors.Errorf("invalid port range specified: %v", addr)
+		}
+		return port, nil
+	}
+
+	minPort, err := parsePort(parts[0])
+	if err != nil {
+		return nil, err
+	}
+	maxPort := minPort
+	if len(parts) == 2 {
+		maxPort, err = parsePort(parts[1])
 		if err != nil {
 			return nil, err
 		}
-		maxPort = minPort
-
-		// multiport assignment
-		if matches[3] != "" {
-			maxPort, err = strconv.Atoi(matches[3])
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		if (minPort > maxPort) || minPort > 65535 || maxPort > 65535 || minPort == 0 || maxPort == 0 {
-			return nil, errors.Errorf("invalid port range specified: minport:%v -> maxport %v", minPort, maxPort)
-		}
-
-		return &MultiPort{
-			Host:    matches[1],
-			MinPort: uint64(minPort),
-			MaxPort: uint64(maxPort),
-		}, nil
 	}
 
-	return nil, errors.Errorf("malformed address:%v", addr)
+	if minPort > maxPort {
+		return nil, errors.Errorf("invalid port range specified: minport:%v -> maxport %v", minPort, maxPort)
+	}
+
+	return &MultiPort{Host: host, MinPort: minPort, MaxPort: maxPort}, nil
 
 }
+
