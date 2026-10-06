@@ -31,6 +31,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -119,6 +120,10 @@ func main() {
 			Name:  "autoexpire",
 			Value: 0,
 			Usage: "set auto expiration time(in seconds) for a single UDP connection, 0 to disable",
+		},
+		cli.BoolFlag{
+			Name:  "graceful",
+			Usage: "retire expired tunnels without interrupting their existing streams; ignore scavengettl",
 		},
 		cli.IntFlag{
 			Name:  "scavengettl",
@@ -263,6 +268,7 @@ func main() {
 		config.Conn = c.Int("conn")
 		config.AutoExpire = c.Int("autoexpire")
 		config.ScavengeTTL = c.Int("scavengettl")
+		config.Graceful = c.Bool("graceful")
 		config.MTU = c.Int("mtu")
 		config.RateLimit = c.Int("ratelimit")
 		config.SndWnd = c.Int("sndwnd")
@@ -297,7 +303,7 @@ func main() {
 			checkError(err)
 		}
 
-		if config.Conn <= 0 {
+		if config.Conn <= 0 || config.Conn > 65535 {
 			log.Fatal("conn must be greater than 0")
 		}
 
@@ -357,6 +363,7 @@ func main() {
 		log.Println("conn:", config.Conn)
 		log.Println("autoexpire:", config.AutoExpire)
 		log.Println("scavengettl:", config.ScavengeTTL)
+		log.Println("graceful:", config.Graceful)
 		log.Println("snmplog:", config.SnmpLog)
 		log.Println("snmpperiod:", config.SnmpPeriod)
 		log.Println("quiet:", config.Quiet)
@@ -375,7 +382,7 @@ func main() {
 		}
 
 		// Ensure scavenger TTL does not exceed the auto-expire window.
-		if config.AutoExpire != 0 && config.ScavengeTTL > config.AutoExpire {
+		if !config.Graceful && config.AutoExpire != 0 && config.ScavengeTTL > config.AutoExpire {
 			color.Red("WARNING: scavengettl is bigger than autoexpire, connections may race hard to use bandwidth.")
 			color.Red("Try limiting scavengettl to a smaller value.")
 		}
@@ -435,15 +442,28 @@ func main() {
 			// Refresh the selected session if it is missing, closed, or past its TTL.
 			if muxes[idx].session == nil || muxes[idx].session.IsClosed() ||
 				(config.AutoExpire > 0 && time.Now().After(muxes[idx].expiryDate)) {
-				muxes[idx].session = waitConn(&config, block)
-				muxes[idx].expiryDate = time.Now().Add(time.Duration(config.AutoExpire) * time.Second)
-				if config.AutoExpire > 0 { // only track TTL when auto-expiration is enabled
-					chScavenger <- muxes[idx]
+				previous := muxes[idx]
+				muxes[idx] = timedSession{
+					session:    waitConn(&config, block),
+					expiryDate: time.Now().Add(time.Duration(config.AutoExpire) * time.Second),
+					clients:    new(int64),
+				}
+				// Only retired sessions may be scavenged: active slots can still
+				// receive clients. A replacement never closes its predecessor.
+				if previous.session != nil && config.AutoExpire > 0 {
+					chScavenger <- previous
 				}
 			}
 
 			// Serve the accepted client in its own goroutine to keep the accept loop responsive.
-			go handleClient(_Q_, []byte(config.Key), muxes[idx].session, p1, config.Quiet, config.CloseWait)
+			selected := muxes[idx]
+			// Reserve before scheduling the goroutine, including OpenStream time.
+			// Otherwise the scavenger can mistake a pending client for an idle tunnel.
+			atomic.AddInt64(selected.clients, 1)
+			go func() {
+				defer atomic.AddInt64(selected.clients, -1)
+				handleClient(_Q_, []byte(config.Key), selected.session, p1, config.Quiet, config.CloseWait)
+			}()
 			rr++
 		}
 	}
@@ -564,6 +584,7 @@ func checkError(err error) {
 type timedSession struct {
 	session    *smux.Session
 	expiryDate time.Time
+	clients    *int64
 }
 
 // scavenger tracks expiring sessions received on ch and closes them after the
@@ -576,9 +597,7 @@ func scavenger(ch chan timedSession, config *Config) {
 	for {
 		select {
 		case item := <-ch:
-			sessionList = append(sessionList, timedSession{
-				item.session,
-				item.expiryDate.Add(time.Duration(config.ScavengeTTL) * time.Second)})
+			sessionList = append(sessionList, item)
 		case <-ticker.C:
 			// Reuse slice capacity to avoid allocation
 			newList := sessionList[:0]
@@ -586,9 +605,9 @@ func scavenger(ch chan timedSession, config *Config) {
 				s := sessionList[k]
 				if s.session.IsClosed() {
 					log.Println("scavenger: session normally closed:", s.session.LocalAddr())
-				} else if time.Now().After(s.expiryDate) {
+				} else if retiredSessionDone(s, config, time.Now()) {
 					s.session.Close()
-					log.Println("scavenger: session closed due to ttl:", s.session.LocalAddr())
+					log.Println("scavenger: retired session closed:", s.session.LocalAddr())
 				} else {
 					newList = append(newList, sessionList[k])
 				}
