@@ -34,7 +34,6 @@ type Config struct {
 	Conn           int    `json:"conn"`
 	AutoExpire     int    `json:"autoexpire"`
 	ScavengeTTL    int    `json:"scavengettl"`
-	Graceful       bool   `json:"graceful"`
 }
 
 func parseJSONConfig(config *Config, path string) error {

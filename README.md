@@ -592,20 +592,3 @@ Click [here](https://github.com/xtaci/xtaci/issues/2) to donate.
 
 
 ***（注意：kcptun没有任何社交网站的账号，请小心骗子。）***
-
-
-### Graceful port rotation (N1)
-
-Use `--remoteaddr SERVER:3000-4000 --autoexpire 300 --graceful`.
-After a tunnel reaches the configured age, the next incoming TCP connection
-creates a replacement using a random port different from the preceding choice
-(when the range contains multiple ports). Existing TCP streams remain attached
-to the old tunnel. Retired tunnels are reclaimed after all their clients finish;
-`--scavengettl` does not force-close them in graceful mode. No client-process
-restart is used for rotation. When idle, no unnecessary replacement is dialed.
-
-Each `--conn` slot has its own age. N1 uses one slot so new streams share one
-rotation interval. The server must accept every configured UDP port with the
-same key/protocol settings and forward them to the same target. Ordinary network
-failure, peer shutdown, and an explicit service restart can still break sessions.
-Long-lived streams retain resources until they finish.

@@ -26,13 +26,12 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"math/big"
 	"net"
 	"sync"
 
 	"github.com/pkg/errors"
-	"github.com/smithwhere/kcptun/std"
 	kcp "github.com/xtaci/kcp-go/v5"
+	"github.com/smithwhere/kcptun/std"
 	"github.com/xtaci/tcpraw"
 )
 
@@ -40,8 +39,6 @@ var (
 	multiPort           *std.MultiPort
 	multiPortParseError error
 	multiPortOnce       sync.Once
-	portMu              sync.Mutex
-	previousPort        uint64
 )
 
 // dial establishes a connection to the configured remote endpoint.
@@ -56,18 +53,14 @@ func dial(config *Config, block kcp.BlockCrypt) (*kcp.UDPSession, error) {
 		return nil, multiPortParseError
 	}
 
-	// Avoid picking the preceding destination again when the range has
-	// multiple ports. Serialize selection for concurrent connection attempts.
-	portMu.Lock()
-	port, err := choosePort(multiPort.MinPort, multiPort.MaxPort, previousPort)
-	if err == nil {
-		previousPort = port
-	}
-	portMu.Unlock()
+	// Pick a random destination port within the configured range.
+	var randport uint64
+	err := binary.Read(rand.Reader, binary.LittleEndian, &randport)
 	if err != nil {
 		return nil, err
 	}
-	remoteAddr := fmt.Sprintf("%v:%v", multiPort.Host, port)
+
+	remoteAddr := fmt.Sprintf("%v:%v", multiPort.Host, uint64(multiPort.MinPort)+randport%uint64(multiPort.MaxPort-multiPort.MinPort+1))
 
 	// Use tcpraw to emulate a TCP transport when requested.
 	if config.TCP {
@@ -98,25 +91,4 @@ func dial(config *Config, block kcp.BlockCrypt) (*kcp.UDPSession, error) {
 
 	// Otherwise fall back to the standard UDP dialing path.
 	return kcp.DialWithOptions(remoteAddr, block, config.DataShard, config.ParityShard)
-}
-
-// choosePort samples uniformly from the range, excluding the previous port.
-func choosePort(min, max, previous uint64) (uint64, error) {
-	if min == 0 || max > 65535 || min > max {
-		return 0, fmt.Errorf("invalid port range: %d-%d", min, max)
-	}
-	size := max - min + 1
-	exclude := size > 1 && previous >= min && previous <= max
-	if exclude {
-		size--
-	}
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(size)))
-	if err != nil {
-		return 0, err
-	}
-	port := min + n.Uint64()
-	if exclude && port >= previous {
-		port++
-	}
-	return port, nil
 }
