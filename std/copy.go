@@ -23,6 +23,7 @@
 package std
 
 import (
+	"errors"
 	"io"
 	"sync"
 	"time"
@@ -78,6 +79,14 @@ func Pipe(alice, bob io.ReadWriteCloser, closeWait int) (errA, errB error) {
 
 		// write error directly to the *pointer
 		_, *err = Copy(dst, src)
+
+		// A failed direction cannot complete a graceful half-close.
+		// Close both ends to unblock the other copy immediately.
+		if *err != nil && !errors.Is(*err, io.EOF) {
+			alice.Close()
+			bob.Close()
+			return
+		}
 
 		if closeWait > 0 {
 			time.Sleep(time.Duration(closeWait) * time.Second)

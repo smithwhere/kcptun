@@ -641,6 +641,8 @@ func (s *stream) CloseWrite() error {
 		return io.ErrClosedPipe
 	}
 
+	// Keep the read side and buffered data alive until the caller invokes Close,
+	// even if the peer has already sent FIN.
 	// send FIN to notify the peer that we are done writing
 	f := newFrame(byte(s.sess.config.Version), cmdFIN, s.id)
 
@@ -648,7 +650,6 @@ func (s *stream) CloseWrite() error {
 	defer timer.Stop()
 
 	_, err := s.sess.writeFrameInternal(f, timer.C, CLSDATA)
-	s.tryHalfCloseCleanup()
 	return err
 }
 
@@ -794,27 +795,6 @@ func (s *stream) fin() {
 	s.finEventOnce.Do(func() {
 		close(s.chFinEvent)
 	})
-	s.tryHalfCloseCleanup()
-}
-
-// tryHalfCloseCleanup removes stream after both sides have sent FIN.
-func (s *stream) tryHalfCloseCleanup() {
-	select {
-	case <-s.chFinEvent:
-	default:
-		return
-	}
-
-	select {
-	case <-s.chWriteClosed:
-	default:
-		return
-	}
-
-	s.dieOnce.Do(func() {
-		close(s.die)
-	})
-	s.sess.streamClosed(s.id)
 }
 
 // stopTimer stops the supplied timer and drains its channel if needed.

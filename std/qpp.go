@@ -92,3 +92,11 @@ func (r *QPPPort) Write(p []byte) (n int, err error) {
 func (r *QPPPort) Close() error {
 	return r.underlying.Close()
 }
+
+// CloseWrite forwards half-close without discarding the reverse direction.
+func (r *QPPPort) CloseWrite() error {
+	if cw, ok := r.underlying.(closeWriter); ok {
+		return cw.CloseWrite()
+	}
+	return r.underlying.Close()
+}

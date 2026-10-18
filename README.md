@@ -247,7 +247,7 @@ GLOBAL OPTIONS:
    --framesize value                smux max frame size (default: 8192)
    --streambuf value                per stream receive buffer in bytes, smux v2+ (default: 2097152)
    --keepalive value                seconds between heartbeats (default: 10)
-   --closewait value                the seconds to wait before tearing down a connection (default: 0)
+   --closewait value                seconds to delay forwarding EOF (0 forwards immediately) (default: 0)
    --snmplog value                  collect snmp to file, aware of timeformat in golang, like: ./snmp-20060102.log
    --snmpperiod value               snmp collect period, in seconds (default: 60)
    --log value                      specify a log file to output, default goes to stderr
@@ -293,7 +293,7 @@ GLOBAL OPTIONS:
    --framesize value                smux max frame size (default: 8192)
    --streambuf value                per stream receive buffer in bytes, smux v2+ (default: 2097152)
    --keepalive value                seconds between heartbeats (default: 10)
-   --closewait value                the seconds to wait before tearing down a connection (default: 30)
+   --closewait value                seconds to delay forwarding EOF (0 forwards immediately) (default: 0)
    --snmplog value                  collect snmp to file, aware of timeformat in golang, like: ./snmp-20060102.log
    --snmpperiod value               snmp collect period, in seconds (default: 60)
    --pprof                          start profiling server on :6060
@@ -592,3 +592,34 @@ Click [here](https://github.com/xtaci/xtaci/issues/2) to donate.
 
 
 ***（注意：kcptun没有任何社交网站的账号，请小心骗子。）***
+
+
+### EOF forwarding and half-close
+
+Both endpoints default to `--closewait 0`. An explicit positive value delays EOF
+forwarding by that many seconds; it does not set an idle timeout. Old server
+binaries defaulted to 30 seconds. Upgrade the VPS server and remove any explicit
+`"closewait": 30` (or set it to `0`) to avoid retaining a dead TCP connection.
+Upgrade both endpoints to include the smux and QPP half-close fixes.
+
+The vendored smux fork keeps unread data until the caller invokes `Close`, even
+when both directions have sent FIN. Do not overwrite this local fix with
+`go mod vendor` without checking the half-close regressions.
+
+Run the end-to-end regression suite with native binaries:
+
+```sh
+go build -mod=vendor -o /tmp/kcptun-client ./client
+go build -mod=vendor -o /tmp/kcptun-server ./server
+python3 tests/test_close_notification.py --client /tmp/kcptun-client --server /tmp/kcptun-server
+```
+
+### Publishing binaries
+
+The release workflow builds all 15 supported targets, runs the Go race tests and
+loopback tunnel regressions on linux/amd64, and publishes archives with SHA-256
+checksums only after every build succeeds. Add `docs/releases/vYYYYMMDD.md`, then
+push the matching `vYYYYMMDD` tag or `release/vYYYYMMDD` branch at the tested
+commit. A release branch lets maintainers publish through GitHub integrations
+which support branch updates. Existing tags and uploaded assets are not replaced.
+A manual workflow dispatch builds artifacts without publishing a release.

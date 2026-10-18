@@ -218,7 +218,7 @@ func main() {
 		cli.IntFlag{
 			Name:  "closewait",
 			Value: 0,
-			Usage: "the seconds to wait before tearing down a connection",
+			Usage: "seconds to delay forwarding EOF (0 forwards immediately)",
 		},
 		cli.StringFlag{
 			Name:  "snmplog",
