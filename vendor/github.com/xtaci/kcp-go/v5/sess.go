@@ -62,32 +62,35 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// Session-layer constants
 const (
 	// 16-bytes nonce for each packet
 	nonceSize = 16
 
-	// 4-bytes packet checksum
+	// 4-bytes CRC32 checksum per packet
 	crcSize = 4
 
-	// overall crypto header size
+	// overall crypto header size: nonce + CRC32
 	cryptHeaderSize = nonceSize + crcSize
 
-	// maximum packet size
+	// maximum packet size (Ethernet MTU)
 	mtuLimit = 1500
 
-	// conv field size
+	// conversation ID field size (bytes)
 	convSize = 4
 
-	// accept backlog
+	// accept backlog: max pending connections for Listener
 	acceptBacklog = 128
 
-	// dev backlog
+	// devBacklog: channel buffer size for post-processing pipeline
 	devBacklog = 2048
 
-	// max latency for consecutive FEC encoding, in millisecond
+	// max latency for consecutive FEC encoding (ms).
+	// If the interval between two data packets exceeds this,
+	// parity generation is skipped.
 	maxFECEncodeLatency = 500
 
-	// max batch size
+	// max number of packets batched in a single sendmmsg/writev call
 	maxBatchSize = 64
 )
 
@@ -270,16 +273,8 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 
 // Read implements net.Conn
 func (s *UDPSession) Read(b []byte) (n int, err error) {
-RESET_TIMER:
+	// The deadline timer is armed only when the read has to wait.
 	var timeout *time.Timer
-	// deadline for current reading operation
-	var c <-chan time.Time
-	if trd, ok := s.rd.Load().(time.Time); ok && !trd.IsZero() {
-		timeout = time.NewTimer(time.Until(trd))
-		c = timeout.C
-		defer timeout.Stop()
-	}
-
 	for {
 		s.mu.Lock()
 		// bufptr points to the current position of recvbuf,
@@ -325,17 +320,17 @@ RESET_TIMER:
 
 		// if it runs here, that means we have to block the call, and wait until the
 		// next data packet arrives.
+		c := armDeadline(&timeout, &s.rd)
 		select {
 		case <-s.chReadEvent:
-			if timeout != nil {
-				timeout.Stop()
-				goto RESET_TIMER
-			}
+			stopTimer(timeout)
 		case <-c:
 			return 0, errors.WithStack(errTimeout)
 		case <-s.chSocketReadError:
+			stopTimer(timeout)
 			return 0, s.socketReadError.Load().(error)
 		case <-s.die:
+			stopTimer(timeout)
 			return 0, errors.WithStack(io.ErrClosedPipe)
 		}
 	}
@@ -346,15 +341,20 @@ func (s *UDPSession) Write(b []byte) (n int, err error) { return s.WriteBuffers(
 
 // WriteBuffers write a vector of byte slices to the underlying connection
 func (s *UDPSession) WriteBuffers(v [][]byte) (n int, err error) {
-RESET_TIMER:
-	var timeout *time.Timer
-	var c <-chan time.Time
-	if twd, ok := s.wd.Load().(time.Time); ok && !twd.IsZero() {
-		timeout = time.NewTimer(time.Until(twd))
-		c = timeout.C
-		defer timeout.Stop()
+	// An empty write only reports the conn's state. It used to run a full
+	// flush, which callers that probe with Write(nil) paid on every frame.
+	if buffersEmpty(v) {
+		select {
+		case <-s.chSocketWriteError:
+			return 0, s.socketWriteError.Load().(error)
+		case <-s.die:
+			return 0, errors.WithStack(io.ErrClosedPipe)
+		default:
+			return 0, nil
+		}
 	}
-
+	// The deadline timer is armed only when the write has to wait.
+	var timeout *time.Timer
 	for {
 		// check for connection close and socket error
 		select {
@@ -401,17 +401,17 @@ RESET_TIMER:
 
 		// if it runs here, that means we have to block the call, and wait until the
 		// transmit buffer to become available again.
+		c := armDeadline(&timeout, &s.wd)
 		select {
 		case <-s.chWriteEvent:
-			if timeout != nil {
-				timeout.Stop()
-				goto RESET_TIMER
-			}
+			stopTimer(timeout)
 		case <-c:
 			return 0, errors.WithStack(errTimeout)
 		case <-s.chSocketWriteError:
+			stopTimer(timeout)
 			return 0, s.socketWriteError.Load().(error)
 		case <-s.die:
+			stopTimer(timeout)
 			return 0, errors.WithStack(io.ErrClosedPipe)
 		}
 	}
@@ -638,10 +638,13 @@ func (s *UDPSession) Control(f func(conn net.PacketConn) error) error {
 	return f(s.conn)
 }
 
-// a goroutine to handle post processing of kcp and make the critical section smaller
-// pipeline for outgoing packets (from ARQ to network)
+// postProcess is the goroutine that handles the outgoing packet pipeline.
+// It runs the following stages sequentially for each packet:
+//  1. FEC encoding   — generate parity shards (Reed-Solomon)
+//  2. Encryption     — AEAD (e.g. AES-GCM) or CFB mode with CRC32
+//  3. TX batching    — accumulate packets and flush via sendmmsg/writev
 //
-//	KCP output -> FEC encoding -> CRC32 integrity -> Encryption -> TxQueue
+// Pipeline: KCP output -> chPostProcessing -> [FEC] -> [Encrypt] -> TxQueue -> Network
 func (s *UDPSession) postProcess() {
 	txqueue := make([]ipv4.Message, 0, devBacklog)
 	chDie := s.die
@@ -656,7 +659,7 @@ func (s *UDPSession) postProcess() {
 
 			var ecc [][]byte
 
-			// 1. FEC encoding
+			// --- Stage 1: FEC encoding ---
 			if s.fecEncoder != nil {
 				if !oob {
 					ecc = s.fecEncoder.encode(buf, maxFECEncodeLatency)
@@ -665,7 +668,10 @@ func (s *UDPSession) postProcess() {
 				}
 			}
 
-			// 2. Encryption
+			// --- Stage 2: Encryption ---
+			// Two modes supported:
+			//   - AEAD (e.g. AES-GCM): nonce + authenticated ciphertext, no separate CRC
+			//   - CFB (legacy block ciphers): random nonce + CRC32 checksum + CFB encryption
 			switch block := s.block.(type) {
 			case nil:
 			case *aeadCrypt: // AEAD mode
@@ -700,7 +706,7 @@ func (s *UDPSession) postProcess() {
 				}
 			}
 
-			// 3. TxQueue
+			// --- Stage 3: TX batching ---
 			var msg ipv4.Message
 			msg.Addr = s.remote
 
@@ -730,10 +736,9 @@ func (s *UDPSession) postProcess() {
 			// transmit when chPostProcessing is empty or we've reached max batch size
 			if len(s.chPostProcessing) == 0 || len(txqueue) >= maxBatchSize {
 				if limiter, ok := s.rateLimiter.Load().(*rate.Limiter); ok {
-					err := limiter.WaitN(ctx, bytesToSend)
-					if err != nil {
-						panic(err)
-					}
+					// WaitN only returns error if the limiter is misconfigured
+					// or context is cancelled. In either case, we continue sending.
+					_ = limiter.WaitN(ctx, bytesToSend)
 				}
 				s.tx(txqueue)
 				s.kcp.debugLog(IKCP_LOG_OUTPUT, "conv", s.kcp.conv, "datalen", bytesToSend)
@@ -921,8 +926,14 @@ func (s *UDPSession) notifyWriteError(err error) {
 	})
 }
 
-// packet input pipeline:
-// network -> [decryption ->] [crc32 ->] [FEC ->] [KCP input ->] stream -> application
+// -----------------------------------------------------------------------
+// Packet input pipeline (decryption -> integrity check -> FEC -> KCP)
+// -----------------------------------------------------------------------
+
+// packetInput is the entry point for incoming packets.
+// It handles decryption and CRC32 verification before passing data to kcpInput.
+//
+// Pipeline: Network -> [Decrypt] -> [CRC32] -> kcpInput
 func (s *UDPSession) packetInput(data []byte) {
 	switch block := s.block.(type) {
 	case nil:
@@ -970,7 +981,16 @@ func (s *UDPSession) packetInput(data []byte) {
 	s.kcpInput(data)
 }
 
-// kcpInput inputs a decrypted and crc32-checked packet into kcp with FEC handling
+// kcpInput routes a decrypted packet into the KCP state machine,
+// handling FEC decoding and OOB delivery.
+//
+// Packet demultiplexing uses the 16-bit field at offset 4:
+//   - 0xf1 (typeData) / 0xf2 (typeParity): FEC-encoded packet
+//   - 0xf3 (typeOOB): out-of-band packet (unreliable, bypasses KCP)
+//   - other values: raw KCP packet (no FEC)
+//
+// Note: KCP cmd values [81-84] with frg [0-255] do not collide with
+// FEC type markers 0x00f1/0x00f2/0x00f3 in little-endian.
 func (s *UDPSession) kcpInput(data []byte) {
 	atomic.AddUint64(&DefaultSnmp.InPkts, 1)
 	atomic.AddUint64(&DefaultSnmp.InBytes, uint64(len(data)))
@@ -1067,6 +1087,10 @@ func (s *UDPSession) kcpInput(data []byte) {
 	}
 }
 
+// -----------------------------------------------------------------------
+// Listener: server-side session multiplexer
+// -----------------------------------------------------------------------
+
 type (
 	// Listener defines a server which will be waiting to accept incoming connections
 	Listener struct {
@@ -1076,10 +1100,9 @@ type (
 		conn         net.PacketConn // the underlying packet connection
 		ownConn      bool           // true if we created conn internally, false if provided by caller
 
-		sessions        map[string]*UDPSession // all sessions accepted by this Listener
-		sessionLock     sync.RWMutex
-		chAccepts       chan *UDPSession // Listen() backlog
-		chSessionClosed chan net.Addr    // session close queue
+		sessions    map[string]*UDPSession // all sessions accepted by this Listener
+		sessionLock sync.RWMutex
+		chAccepts   chan *UDPSession // Listen() backlog
 
 		die     chan struct{} // notify the listener has closed
 		dieOnce sync.Once
@@ -1093,7 +1116,9 @@ type (
 	}
 )
 
-// packet input stage
+// packetInput is the Listener's packet input handler.
+// It decrypts the packet, demultiplexes by remote address,
+// and dispatches to existing sessions or creates new ones.
 func (l *Listener) packetInput(data []byte, addr net.Addr) {
 	switch block := l.block.(type) {
 	case nil:
@@ -1365,6 +1390,10 @@ func (l *Listener) Addr() net.Addr {
 	return l.conn.LocalAddr()
 }
 
+// -----------------------------------------------------------------------
+// Public API: Dial, Listen, and connection factory functions
+// -----------------------------------------------------------------------
+
 // Listen listens for incoming KCP packets addressed to the local address laddr on the network "udp",
 func Listen(laddr string) (net.Listener, error) {
 	return ListenWithOptions(laddr, nil, 0, 0)
@@ -1402,7 +1431,6 @@ func serveConn(block BlockCrypt, dataShards, parityShards int, conn net.PacketCo
 	l.ownConn = ownConn
 	l.sessions = make(map[string]*UDPSession)
 	l.chAccepts = make(chan *UDPSession, acceptBacklog)
-	l.chSessionClosed = make(chan net.Addr)
 	l.die = make(chan struct{})
 	l.dataShards = dataShards
 	l.parityShards = parityShards
@@ -1470,4 +1498,39 @@ func NewConn(raddr string, block BlockCrypt, dataShards, parityShards int, conn 
 		return nil, errors.WithStack(err)
 	}
 	return NewConn2(udpaddr, block, dataShards, parityShards, conn)
+}
+
+// armDeadline starts or resets t for the deadline held in v, just before a
+// blocking wait, and returns its channel. It returns nil without a deadline.
+func armDeadline(t **time.Timer, v *atomic.Value) <-chan time.Time {
+	d, ok := v.Load().(time.Time)
+	if !ok || d.IsZero() {
+		return nil
+	}
+	if *t == nil {
+		*t = time.NewTimer(time.Until(d))
+	} else {
+		(*t).Reset(time.Until(d))
+	}
+	return (*t).C
+}
+
+// stopTimer stops t, if armed, and drains a fire it may have left.
+func stopTimer(t *time.Timer) {
+	if t != nil && !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+}
+
+// buffersEmpty reports whether v holds no bytes.
+func buffersEmpty(v [][]byte) bool {
+	for _, b := range v {
+		if len(b) > 0 {
+			return false
+		}
+	}
+	return true
 }

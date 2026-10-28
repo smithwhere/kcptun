@@ -17,8 +17,6 @@
 [12]: LICENSE
 [13]: https://sourcegraph.com/github.com/xtaci/kcp-go/-/badge.svg
 [14]: https://sourcegraph.com/github.com/xtaci/kcp-go?badge
- 
-[English](README.md) | [中文](README_zh.md)
 
 
 ## Table of Contents
@@ -47,7 +45,7 @@
 
 **kcp-go** is a **Reliable-UDP** library for [golang](https://golang.org/).
 
-This library provides **smooth, resilient, ordered, error-checked, and anonymous** stream delivery over **UDP** packets. Battle-tested with the open-source project [kcptun](https://github.com/xtaci/kcptun), millions of devices—from low-end MIPS routers to high-end servers—have deployed kcp-go-powered programs across various applications, including **online games, live broadcasting, file synchronization, and network acceleration**.
+This library provides **smooth, resilient, ordered, error-checked, and anonymous** stream delivery over **UDP** packets. It has been deployed across millions of devices—from low-end MIPS routers to high-end servers—across various applications, including **online games, live broadcasting, file synchronization, and network acceleration**.
 
 [Latest Release](https://github.com/xtaci/kcp-go/releases)
 
@@ -351,13 +349,13 @@ ok      github.com/xtaci/kcp-go/v5      64.151s
 
 
 ## Typical Flame Graph
-![Flame Graph in kcptun](assets/flame.png)
+![Typical flame graph](assets/flame.png)
 
 
 
 ## Connection Termination
 
-Control messages like **SYN/FIN/RST** in TCP **are not defined** in KCP. You need a **keepalive/heartbeat mechanism** at the application level. A practical example is to use a **multiplexing** protocol over the session, such as [smux](https://github.com/xtaci/smux) (which has an embedded keepalive mechanism). See [kcptun](https://github.com/xtaci/kcptun) for a reference implementation.
+Control messages like **SYN/FIN/RST** in TCP **are not defined** in KCP. You need a **keepalive/heartbeat mechanism** at the application level. A practical example is to use a **multiplexing** protocol over the session, such as [smux](https://github.com/xtaci/smux) (which has an embedded keepalive mechanism).
 
 ## FAQ
 
@@ -375,12 +373,11 @@ Control messages like **SYN/FIN/RST** in TCP **are not defined** in KCP. You nee
 
 ## Who is using this?
 
-1. https://github.com/xtaci/kcptun -- A Secure Tunnel Based on KCP over UDP.
-2. https://github.com/getlantern/lantern -- Lantern delivers fast access to the open Internet.
-3. https://github.com/smallnest/rpcx -- An RPC service framework based on net/rpc, similar to Alibaba Dubbo and Weibo Motan.
-4. https://github.com/gonet2/agent -- A gateway for games with stream multiplexing.
-5. https://github.com/syncthing/syncthing -- Open Source Continuous File Synchronization.
-6. https://github.com/hanselime/paqet -- A bidirectional packet-level proxy built using raw sockets and KCP.
+1. https://github.com/getlantern/lantern -- Lantern delivers fast access to the open Internet.
+2. https://github.com/smallnest/rpcx -- An RPC service framework based on net/rpc, similar to Alibaba Dubbo and Weibo Motan.
+3. https://github.com/gonet2/agent -- A gateway for games with stream multiplexing.
+4. https://github.com/syncthing/syncthing -- Open Source Continuous File Synchronization.
+5. https://github.com/hanselime/paqet -- A bidirectional packet-level proxy built using raw sockets and KCP.
 
 ### Looking for a C++ client?
 1. https://github.com/xtaci/libkcp -- FEC enhanced KCP session library for iOS/Android in C++
@@ -388,8 +385,6 @@ Control messages like **SYN/FIN/RST** in TCP **are not defined** in KCP. You nee
 ## Examples
 
 1. [simple examples](https://github.com/xtaci/kcp-go/tree/master/examples)
-2. [kcptun client](https://github.com/xtaci/kcptun/blob/master/client/main.go)
-3. [kcptun server](https://github.com/xtaci/kcptun/blob/master/server/main.go)
 
 ## Links
 

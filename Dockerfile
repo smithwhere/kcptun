@@ -1,4 +1,4 @@
-FROM golang:1.25.4-alpine3.21 AS builder
+FROM golang:1.27.3-alpine AS builder
 MAINTAINER xtaci <daniel820313@gmail.com>
 LABEL org.opencontainers.image.source=https://github.com/smithwhere/kcptun
 ENV GO111MODULE=on

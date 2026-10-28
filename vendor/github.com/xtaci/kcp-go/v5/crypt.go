@@ -173,6 +173,9 @@ func NewSalsa20BlockCrypt(key []byte) (BlockCrypt, error) {
 
 //go:nosplit
 func (c *salsa20BlockCrypt) Encrypt(dst, src []byte) {
+	if len(src) < 8 {
+		return
+	}
 	salsa20.XORKeyStream(dst[8:], src[8:], src[:8], &c.key)
 	if &dst[0] != &src[0] {
 		copy(dst[:8], src[:8])
@@ -181,6 +184,9 @@ func (c *salsa20BlockCrypt) Encrypt(dst, src []byte) {
 
 //go:nosplit
 func (c *salsa20BlockCrypt) Decrypt(dst, src []byte) {
+	if len(src) < 8 {
+		return
+	}
 	salsa20.XORKeyStream(dst[8:], src[8:], src[:8], &c.key)
 	if &dst[0] != &src[0] {
 		copy(dst[:8], src[:8])
@@ -270,8 +276,18 @@ func NewSimpleXORBlockCrypt(key []byte) (BlockCrypt, error) {
 	return c, nil
 }
 
-func (c *simpleXORBlockCrypt) Encrypt(dst, src []byte) { subtle.XORBytes(dst, src, c.xortbl) }
-func (c *simpleXORBlockCrypt) Decrypt(dst, src []byte) { subtle.XORBytes(dst, src, c.xortbl) }
+func (c *simpleXORBlockCrypt) Encrypt(dst, src []byte) {
+	if len(src) == 0 {
+		return
+	}
+	subtle.XORBytes(dst, src, c.xortbl)
+}
+func (c *simpleXORBlockCrypt) Decrypt(dst, src []byte) {
+	if len(src) == 0 {
+		return
+	}
+	subtle.XORBytes(dst, src, c.xortbl)
+}
 
 type noneBlockCrypt struct{}
 
@@ -282,6 +298,9 @@ func NewNoneBlockCrypt(key []byte) (BlockCrypt, error) {
 
 //go:nosplit
 func (c *noneBlockCrypt) Encrypt(dst, src []byte) {
+	if len(src) == 0 {
+		return
+	}
 	if &dst[0] != &src[0] {
 		copy(dst, src)
 	}
@@ -289,12 +308,28 @@ func (c *noneBlockCrypt) Encrypt(dst, src []byte) {
 
 //go:nosplit
 func (c *noneBlockCrypt) Decrypt(dst, src []byte) {
+	if len(src) == 0 {
+		return
+	}
 	if &dst[0] != &src[0] {
 		copy(dst, src)
 	}
 }
 
-// packet encryption with local CFB mode
+// -----------------------------------------------------------------------
+// CFB-mode encryption/decryption
+// -----------------------------------------------------------------------
+//
+// For block ciphers (non-AEAD), packets are encrypted using a local variant
+// of CFB (Cipher Feedback) mode. The encrypt/decrypt functions below are
+// hand-optimized with 8x loop unrolling to reduce data dependencies
+// between consecutive block cipher calls.
+//
+// Two block sizes are supported:
+//   - 8-byte blocks  (e.g. Blowfish, CAST5, DES, TEA, XTEA)
+//   - 16-byte blocks (e.g. AES, Twofish, SM4)
+
+// encrypt dispatches to the appropriate block-size-specific CFB encryptor.
 func encrypt(block cipher.Block, dst, src, buf []byte) {
 	switch block.BlockSize() {
 	case 8:
@@ -306,14 +341,15 @@ func encrypt(block cipher.Block, dst, src, buf []byte) {
 	}
 }
 
-// optimized encryption for the ciphers which works in 8-bytes
+// encrypt8 performs CFB encryption for 8-byte block ciphers.
+// Uses 8x loop unrolling for throughput optimization.
 func encrypt8(block cipher.Block, dst, src, buf []byte) {
 	tbl := buf[:8]
 	block.Encrypt(tbl, initialVector)
-	n := len(src) >> 3 // len(src) / 8
+	n := len(src) >> 3 // number of full 8-byte blocks
 	base := 0
-	repeat := n >> 3 // n / 8
-	left := n & 7    // n % 8
+	repeat := n >> 3 // number of 8-block groups (64 bytes each)
+	left := n & 7    // remaining blocks after groups
 
 	for range repeat {
 		s := src[base:][0:64]
@@ -386,14 +422,15 @@ func encrypt8(block cipher.Block, dst, src, buf []byte) {
 	}
 }
 
-// optimized encryption for the ciphers which works in 16-bytes
+// encrypt16 performs CFB encryption for 16-byte block ciphers.
+// Uses 8x loop unrolling for throughput optimization.
 func encrypt16(block cipher.Block, dst, src, buf []byte) {
 	tbl := buf[:16]
 	block.Encrypt(tbl, initialVector)
-	n := len(src) >> 4 // len(src) / 16
+	n := len(src) >> 4 // number of full 16-byte blocks
 	base := 0
-	repeat := n >> 3 // n / 8
-	left := n & 7    // n % 8
+	repeat := n >> 3 // number of 8-block groups (128 bytes each)
+	left := n & 7    // remaining blocks after groups
 	for range repeat {
 		s := src[base:][0:128]
 		d := dst[base:][0:128]
@@ -465,7 +502,7 @@ func encrypt16(block cipher.Block, dst, src, buf []byte) {
 	}
 }
 
-// decryption
+// decrypt dispatches to the appropriate block-size-specific CFB decryptor.
 func decrypt(block cipher.Block, dst, src, buf []byte) {
 	switch block.BlockSize() {
 	case 8:
@@ -477,17 +514,19 @@ func decrypt(block cipher.Block, dst, src, buf []byte) {
 	}
 }
 
-// decrypt 8 bytes block
+// decrypt8 performs CFB decryption for 8-byte block ciphers.
+// Uses double-buffering (tbl/next) with 8x loop unrolling
+// to break the data dependency chain between consecutive blocks.
 func decrypt8(block cipher.Block, dst, src, buf []byte) {
 	tbl := buf[0:8]
 	next := buf[8:16]
 	block.Encrypt(tbl, initialVector)
-	n := len(src) >> 3 // len(src) / 8
+	n := len(src) >> 3 // number of full 8-byte blocks
 	base := 0
-	repeat := n >> 3 // n / 8
-	left := n & 7    // n % 8
+	repeat := n >> 3 // number of 8-block groups (64 bytes each)
+	left := n & 7    // remaining blocks after groups
 
-	// loop unrolling to relieve data dependency
+	// 8x loop unrolling: alternates tbl/next to relieve data dependency
 	for range repeat {
 		s := src[base:][0:64]
 		d := dst[base:][0:64]
@@ -566,16 +605,18 @@ func decrypt8(block cipher.Block, dst, src, buf []byte) {
 	}
 }
 
+// decrypt16 performs CFB decryption for 16-byte block ciphers.
+// Uses double-buffering (tbl/next) with 8x loop unrolling.
 func decrypt16(block cipher.Block, dst, src, buf []byte) {
 	tbl := buf[0:16]
 	next := buf[16:32]
 	block.Encrypt(tbl, initialVector)
-	n := len(src) >> 4 // len(src) / 16
+	n := len(src) >> 4 // number of full 16-byte blocks
 	base := 0
-	repeat := n >> 3 // n / 8
-	left := n & 7    // n % 8
+	repeat := n >> 3 // number of 8-block groups (128 bytes each)
+	left := n & 7    // remaining blocks after groups
 
-	// loop unrolling to relieve data dependency
+	// 8x loop unrolling: alternates tbl/next to relieve data dependency
 	for range repeat {
 		s := src[base:][0:128]
 		d := dst[base:][0:128]
