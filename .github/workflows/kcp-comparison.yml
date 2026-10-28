@@ -1,0 +1,66 @@
+name: KCP regression comparison
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'server/**'
+      - 'std/**'
+      - 'vendor/github.com/xtaci/smux/**'
+      - '.github/workflows/kcp-comparison.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kcp: [v5.6.66, v5.6.73]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Select only the baseline KCP dependency
+        if: matrix.kcp == 'v5.6.66'
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline=a2082bd7f25538855a4b6205dd3a2a9d8815877a
+          git restore --source="$baseline" -- vendor/github.com/xtaci/kcp-go/v5
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('go.mod', 'vendor/modules.txt'):
+              p = Path(name)
+              old = 'github.com/xtaci/kcp-go/v5 v5.6.73'
+              text = p.read_text()
+              assert text.count(old) == 1, name
+              p.write_text(text.replace(old, 'github.com/xtaci/kcp-go/v5 v5.6.66'))
+          PY
+      - name: Race tests
+        run: go test -mod=vendor -race ./...
+      - name: Build diagnostic binaries
+        shell: bash
+        env:
+          KCP_VERSION: ${{ matrix.kcp }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          version="diag-${GITHUB_SHA:0:8}-kcp-${KCP_VERSION}"
+          CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags "-X main.VERSION=$version" -o artifacts/server_linux_amd64 ./server
+          CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags "-X main.VERSION=$version" -o artifacts/client_linux_amd64 ./client
+          go version -m artifacts/server_linux_amd64 > artifacts/build-info.txt
+          (cd artifacts && sha256sum server_linux_amd64 client_linux_amd64 > SHA256SUMS)
+      - name: Real tunnel EOF and half-close regressions
+        run: python3 tests/test_close_notification.py --server artifacts/server_linux_amd64 --client artifacts/client_linux_amd64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kcptun-linux-amd64-kcp-${{ matrix.kcp }}
+          path: artifacts/
+          if-no-files-found: error

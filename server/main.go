@@ -448,6 +448,7 @@ func serveListener(lis *kcp.Listener, _Q_ *qpp.QuantumPermutationPad, config *Co
 // handleMux drives a single KCP session: it accepts smux streams and forwards
 // each stream to the configured TCP or UNIX target.
 func handleMux(_Q_ *qpp.QuantumPermutationPad, conn net.Conn, config *Config) {
+	started := time.Now()
 	// Determine whether the upstream target is TCP or a UNIX socket path.
 	targetType := TGT_TCP
 	if _, _, err := net.SplitHostPort(config.Target); err != nil {
@@ -475,12 +476,13 @@ func handleMux(_Q_ *qpp.QuantumPermutationPad, conn net.Conn, config *Config) {
 		return
 	}
 	defer mux.Close()
+	log.Printf("smux session ready local=%s remote=%s heartbeat=%s timeout=%s", conn.LocalAddr(), conn.RemoteAddr(), smuxConfig.KeepAliveInterval, smuxConfig.KeepAliveTimeout)
 
 	// Accept and handle smux streams until the session terminates.
 	for {
 		stream, err := mux.AcceptStream()
 		if err != nil {
-			log.Println(err)
+			log.Printf("smux session ended local=%s remote=%s duration=%s streams=%d reason=%v", conn.LocalAddr(), conn.RemoteAddr(), time.Since(started), mux.NumStreams(), err)
 			return
 		}
 

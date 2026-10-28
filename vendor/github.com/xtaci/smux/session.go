@@ -67,12 +67,17 @@ func (timeoutError) Error() string   { return "timeout" }
 func (timeoutError) Temporary() bool { return true }
 func (timeoutError) Timeout() bool   { return true }
 
+type keepaliveTimeoutError struct{ timeoutError }
+
+func (keepaliveTimeoutError) Error() string { return "smux keepalive timeout" }
+
 var (
-	ErrInvalidProtocol           = errors.New("invalid protocol")
-	ErrConsumed                  = errors.New("peer consumed more than sent")
-	ErrGoAway                    = errors.New("stream id overflows, should start a new connection")
-	ErrTimeout         net.Error = &timeoutError{}
-	ErrWouldBlock                = errors.New("operation would block on IO")
+	ErrInvalidProtocol            = errors.New("invalid protocol")
+	ErrConsumed                   = errors.New("peer consumed more than sent")
+	ErrGoAway                     = errors.New("stream id overflows, should start a new connection")
+	ErrTimeout          net.Error = &timeoutError{}
+	ErrKeepAliveTimeout net.Error = &keepaliveTimeoutError{}
+	ErrWouldBlock                 = errors.New("operation would block on IO")
 )
 
 // writeRequest represents a request to write a frame
@@ -104,9 +109,10 @@ type Session struct {
 	streams    map[uint32]*stream // all streams in this session
 	streamLock sync.Mutex         // locks streams
 
-	die     chan struct{} // flag session has died
-	dieOnce sync.Once
-	closed  int32 // atomic flag for fast IsClosed check
+	die               chan struct{} // flag session has died
+	dieOnce           sync.Once
+	closed            int32 // atomic flag for fast IsClosed check
+	keepaliveTimedOut int32 // set before closing a silent session
 
 	// socket error handling
 	socketReadError      atomic.Value
@@ -243,12 +249,21 @@ func (s *Session) AcceptStream() (*Stream, error) {
 	case <-deadline:
 		return nil, ErrTimeout
 	case <-s.chSocketReadError:
-		return nil, s.socketReadError.Load().(error)
+		return nil, s.acceptError(s.socketReadError.Load().(error))
 	case <-s.chProtoError:
 		return nil, s.protoError.Load().(error)
 	case <-s.die:
-		return nil, io.ErrClosedPipe
+		return nil, s.acceptError(io.ErrClosedPipe)
 	}
+}
+
+// Closing the transport also wakes recvLoop. Preserve the timeout cause whichever
+// ready channel AcceptStream selects, including calls made after session closure.
+func (s *Session) acceptError(fallback error) error {
+	if atomic.LoadInt32(&s.keepaliveTimedOut) != 0 {
+		return ErrKeepAliveTimeout
+	}
+	return fallback
 }
 
 // Accept Returns a generic ReadWriteCloser instead of smux.Stream
@@ -258,8 +273,17 @@ func (s *Session) Accept() (io.ReadWriteCloser, error) {
 
 // Close is used to close the session and all streams.
 func (s *Session) Close() error {
+	return s.close(false)
+}
+
+func (s *Session) close(keepaliveTimeout bool) error {
 	var once bool
 	s.dieOnce.Do(func() {
+		// Retain the cause of the first close, even if explicit Close races the
+		// watchdog. Publish it before waking AcceptStream via die.
+		if keepaliveTimeout {
+			atomic.StoreInt32(&s.keepaliveTimedOut, 1)
+		}
 		atomic.StoreInt32(&s.closed, 1)
 		close(s.die)
 		once = true
@@ -516,7 +540,7 @@ func (s *Session) keepalive() {
 				// recvLoop may block while bucket is 0, in this case,
 				// session should not be closed.
 				if atomic.LoadInt32(&s.bucket) > 0 {
-					s.Close()
+					s.close(true)
 					return
 				}
 			}
