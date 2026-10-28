@@ -24,6 +24,8 @@ package std
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 )
 
@@ -101,5 +103,19 @@ func ParseJSONConfig(config interface{}, path string) error {
 	}
 	defer file.Close()
 
-	return json.NewDecoder(file).Decode(config)
+	decoder := json.NewDecoder(file)
+	if err := decoder.Decode(config); err != nil {
+		return err
+	}
+
+	// Reject concatenated JSON values and trailing garbage rather than
+	// silently starting the tunnel with only the first value applied.
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("invalid JSON config: multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }

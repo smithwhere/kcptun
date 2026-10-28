@@ -22,6 +22,16 @@ func ValidateFECParams(data, parity int) error {
 	return nil
 }
 
+// ValidateRateLimit protects the uint32 conversion passed to kcp-go.
+// Values exceeding uint32 would wrap and silently disable/alter pacing.
+func ValidateRateLimit(rate int) error {
+	const maxRate = uint64(^uint32(0))
+	if rate < 0 || uint64(rate) > maxRate {
+		return fmt.Errorf("ratelimit must be between 0 and %d", maxRate)
+	}
+	return nil
+}
+
 // ValidateMTU accounts for the same wire overhead as UDPSession.SetMtu.
 func ValidateMTU(mtu int, block kcp.BlockCrypt, data, parity int) error {
 	// kcp-go requires an inner MTU of at least 50 and caps packets at 1500.

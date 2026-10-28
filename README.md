@@ -254,7 +254,7 @@ GLOBAL OPTIONS:
    --quiet                          to suppress the 'stream open/close' messages
    --tcp                            to emulate a TCP connection(linux)
    -c value                         config from json file, which will override the command from shell
-   --pprof                          start profiling server on :6060
+   --pprof                          start profiling server on 127.0.0.1:6060
    --help, -h                       show help
    --version, -v                    print the version
 
@@ -296,7 +296,7 @@ GLOBAL OPTIONS:
    --closewait value                seconds to delay forwarding EOF (0 forwards immediately) (default: 0)
    --snmplog value                  collect snmp to file, aware of timeformat in golang, like: ./snmp-20060102.log
    --snmpperiod value               snmp collect period, in seconds (default: 60)
-   --pprof                          start profiling server on :6060
+   --pprof                          start profiling server on 127.0.0.1:6060
    --log value                      specify a log file to output, default goes to stderr
    --quiet                          to suppress the 'stream open/close' messages
    --tcp                            to emulate a TCP connection(linux)
@@ -346,6 +346,8 @@ Without pacing, KCP may send data in large bursts (micro-bursts). These sudden s
 **How to use:**
 
 Use `--ratelimit <value>` to set the maximum outgoing speed (in bytes per second) for a single KCP connection.
+
+The supported range is `0` (unlimited) through `4294967295` bytes/second. Out-of-range positive values are rejected instead of silently wrapping. When `--pprof` is enabled, profiling is available only at `127.0.0.1:6060`; use a secure tunnel if remote diagnostics are required.
 - Example: `--ratelimit 1048576` limits the speed to 1MB/s.
 - Default: `0` (unlimited).
 

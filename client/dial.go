@@ -27,7 +27,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
-	"sync"
 
 	"github.com/pkg/errors"
 	kcp "github.com/xtaci/kcp-go/v5"
@@ -35,27 +34,18 @@ import (
 	"github.com/xtaci/tcpraw"
 )
 
-var (
-	multiPort           *std.MultiPort
-	multiPortParseError error
-	multiPortOnce       sync.Once
-)
-
 // dial establishes a connection to the configured remote endpoint.
 func dial(config *Config, block kcp.BlockCrypt) (*kcp.UDPSession, error) {
-	// Parse the multiPort definition only once.
-	multiPortOnce.Do(func() {
-		multiPort, multiPortParseError = std.ParseMultiPort(config.RemoteAddr)
-	})
-
-	// Abort when the multiPort definition is invalid.
-	if multiPortParseError != nil {
-		return nil, multiPortParseError
+	// The address belongs to this configuration, not to the process. Caching
+	// it globally would silently route later calls to an earlier remote.
+	multiPort, err := std.ParseMultiPort(config.RemoteAddr)
+	if err != nil {
+		return nil, err
 	}
 
 	// Pick a random destination port within the configured range.
 	var randport uint64
-	err := binary.Read(rand.Reader, binary.LittleEndian, &randport)
+	err = binary.Read(rand.Reader, binary.LittleEndian, &randport)
 	if err != nil {
 		return nil, err
 	}

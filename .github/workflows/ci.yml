@@ -1,0 +1,32 @@
+name: Source and Runtime Checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.13'
+          cache: true
+      - name: Unit tests with race detector
+        run: go test -race -mod=vendor -timeout 120s ./...
+      - name: Static analysis
+        run: go vet -mod=vendor ./...
+      - name: Build integration-test binaries
+        run: |
+          go build -mod=vendor -o /tmp/kcptun-audit-client ./client
+          go build -mod=vendor -o /tmp/kcptun-audit-server ./server
+      - name: Invalid configuration integration tests
+        run: python3 tests/test_invalid_config.py --client /tmp/kcptun-audit-client --server /tmp/kcptun-audit-server
+      - name: TCP EOF and QPP integration tests
+        run: python3 tests/test_close_notification.py --client /tmp/kcptun-audit-client --server /tmp/kcptun-audit-server
