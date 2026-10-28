@@ -82,3 +82,28 @@ func assertRoundTrip(t *testing.T, writer io.Writer, reader io.Reader, payload [
 		t.Fatalf("round trip error: %v", err)
 	}
 }
+
+type qppTestSink struct{ bytes.Buffer }
+
+func (s *qppTestSink) Close() error { return nil }
+
+func TestQPPPortWritePreservesInput(t *testing.T) {
+	sink := &qppTestSink{}
+	pad := qpp.NewQPP([]byte("pad-seed"), 61)
+	port := NewQPPPort(sink, pad, []byte("stream-seed"))
+	payload := bytes.Repeat([]byte("reusable caller buffer"), 1000)
+	original := append([]byte(nil), payload...)
+	for i := 0; i < 2; i++ {
+		if n, err := port.Write(payload); err != nil || n != len(payload) {
+			t.Fatalf("write = %d, %v", n, err)
+		}
+		if !bytes.Equal(payload, original) {
+			t.Fatal("Write modified caller buffer")
+		}
+	}
+	received := append([]byte(nil), sink.Bytes()...)
+	pad.DecryptWithPRNG(received, qpp.CreatePRNG([]byte("stream-seed")))
+	if !bytes.Equal(received, bytes.Repeat(original, 2)) {
+		t.Fatal("repeated writes did not decrypt to the original plaintext")
+	}
+}

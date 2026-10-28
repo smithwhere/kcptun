@@ -44,6 +44,28 @@ class InvalidConfigTests(unittest.TestCase):
                 self.assertIn(parameter.lower(), result.stdout.lower(), result.stdout)
                 self.assertNotIn('listening on:', result.stdout, result.stdout)
 
+    def test_both_endpoints_reject_bad_fec(self):
+        for binary in (args.client, args.server):
+            for data, parity in ((-1, 3), (10, -1), (256, 1), (2147483648, 2147483648)):
+                with self.subTest(binary=binary, data=data, parity=parity):
+                    self.assert_rejected(binary, {'datashard': data, 'parityshard': parity}, 'FEC')
+
+    def test_both_endpoints_reject_bad_mtu(self):
+        for binary in (args.client, args.server):
+            for mtu in (0, 40, 77, 1501):
+                with self.subTest(binary=binary, mtu=mtu):
+                    self.assert_rejected(binary, {'mtu': mtu}, 'MTU')
+
+    def test_startup_errors_exit_nonzero(self):
+        for binary in (args.client, args.server):
+            for flag in ('--does-not-exist',):
+                result = subprocess.run([str(binary.resolve()), flag], capture_output=True,
+                                        text=True, timeout=2)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = subprocess.run([str(args.server.resolve()), '--listen=invalid'],
+                                capture_output=True, text=True, timeout=2)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_client_rejects_connection_count_outside_uint16_range(self):
         for value in (-1, 0, 65536, 65537, 131072):
             with self.subTest(conn=value):

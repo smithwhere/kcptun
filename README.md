@@ -372,6 +372,10 @@ For every `datashard` packets sent, `parityshard` redundant packets are generate
 The bandwidth overhead can be calculated as: `parityshard / datashard`.
 For the default setting (10 data, 3 parity), the overhead is 30%.
 
+Shard counts must be nonnegative. When FEC is enabled, data and parity shard counts must total at most 256. Invalid settings are rejected at startup.
+
+`--mtu` is limited to 1500 bytes and must leave at least 50 bytes after encryption and FEC overhead. With the default AES encryption and FEC, the minimum is 78 bytes. Invalid MTU settings are rejected instead of silently using the default.
+
 **Configuration Guide:**
 
 1. **AutoTune**: The receiver automatically detects and adapts to the sender's FEC parameters (DataShard/ParityShard), so you can adjust them on one side without restarting the other.

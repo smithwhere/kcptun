@@ -300,6 +300,7 @@ func main() {
 		if config.Conn <= 0 || config.Conn > 65535 {
 			log.Fatal("conn must be between 1 and 65535")
 		}
+		checkError(std.ValidateFECParams(config.DataShard, config.ParityShard))
 		_, err := std.BuildSmuxConfig(config.SmuxVer, config.SmuxBuf, config.StreamBuf, config.FrameSize, config.KeepAlive)
 		checkError(err)
 		if config.QPP {
@@ -322,6 +323,14 @@ func main() {
 
 		// Apply mode presets using the shared configuration helper.
 		config.ApplyMode()
+
+		// Derive the shared encryption key and prepare the block cipher.
+		log.Println("initiating key derivation")
+		pass := pbkdf2.Key([]byte(config.Key), []byte(SALT), 4096, 32, sha1.New)
+		log.Println("key derivation done")
+		block, effectiveCrypt := std.SelectBlockCrypt(config.Crypt, pass)
+		config.Crypt = effectiveCrypt
+		checkError(std.ValidateMTU(config.MTU, block, config.DataShard, config.ParityShard))
 
 		log.Println("version:", VERSION)
 		var listener net.Listener
@@ -391,13 +400,6 @@ func main() {
 			log.Fatal("unsupported smux version:", config.SmuxVer)
 		}
 
-		// Derive the shared encryption key and prepare the block cipher.
-		log.Println("initiating key derivation")
-		pass := pbkdf2.Key([]byte(config.Key), []byte(SALT), 4096, 32, sha1.New)
-		log.Println("key derivation done")
-		block, effectiveCrypt := std.SelectBlockCrypt(config.Crypt, pass)
-		config.Crypt = effectiveCrypt
-
 		// Continuously export SNMP counters when requested.
 		go std.SnmpLogger(config.SnmpLog, config.SnmpPeriod)
 
@@ -453,7 +455,7 @@ func main() {
 			rr++
 		}
 	}
-	myApp.Run(os.Args)
+	checkError(myApp.Run(os.Args))
 }
 
 // createConn establishes a fresh KCP connection with all tunables applied and
@@ -467,7 +469,10 @@ func createConn(config *Config, block kcp.BlockCrypt) (*smux.Session, error) {
 	kcpconn.SetWriteDelay(false)
 	kcpconn.SetNoDelay(config.NoDelay, config.Interval, config.Resend, config.NoCongestion)
 	kcpconn.SetWindowSize(config.SndWnd, config.RcvWnd)
-	kcpconn.SetMtu(config.MTU)
+	if !kcpconn.SetMtu(config.MTU) {
+		kcpconn.Close()
+		return nil, fmt.Errorf("invalid MTU: %d", config.MTU)
+	}
 	kcpconn.SetACKNoDelay(config.AckNodelay)
 	kcpconn.SetRateLimit(uint32(config.RateLimit))
 
