@@ -285,6 +285,12 @@ func main() {
 			err := parseJSONConfig(&config, c.String("c"))
 			checkError(err)
 		}
+		_, err := std.BuildSmuxConfig(config.SmuxVer, config.SmuxBuf, config.StreamBuf, config.FrameSize, config.KeepAlive)
+		checkError(err)
+		if config.QPP {
+			_, err := std.ValidateQPPParams(config.QPPCount, config.Key)
+			checkError(err)
+		}
 
 		if config.RateLimit < 0 {
 			log.Printf("ratelimit %d is negative, falling back to 0", config.RateLimit)

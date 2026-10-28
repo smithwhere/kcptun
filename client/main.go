@@ -297,8 +297,14 @@ func main() {
 			checkError(err)
 		}
 
-		if config.Conn <= 0 {
-			log.Fatal("conn must be greater than 0")
+		if config.Conn <= 0 || config.Conn > 65535 {
+			log.Fatal("conn must be between 1 and 65535")
+		}
+		_, err := std.BuildSmuxConfig(config.SmuxVer, config.SmuxBuf, config.StreamBuf, config.FrameSize, config.KeepAlive)
+		checkError(err)
+		if config.QPP {
+			_, err := std.ValidateQPPParams(config.QPPCount, config.Key)
+			checkError(err)
 		}
 
 		if config.RateLimit < 0 {
