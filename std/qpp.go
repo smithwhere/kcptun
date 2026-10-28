@@ -85,8 +85,9 @@ func (r *QPPPort) Read(p []byte) (n int, err error) {
 }
 
 func (r *QPPPort) Write(p []byte) (n int, err error) {
-	r.pad.EncryptWithPRNG(p, r.wprng)
-	return r.underlying.Write(p)
+	ciphertext := append([]byte(nil), p...)
+	r.pad.EncryptWithPRNG(ciphertext, r.wprng)
+	return r.underlying.Write(ciphertext)
 }
 
 func (r *QPPPort) Close() error {

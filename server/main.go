@@ -285,6 +285,7 @@ func main() {
 			err := parseJSONConfig(&config, c.String("c"))
 			checkError(err)
 		}
+		checkError(std.ValidateFECParams(config.DataShard, config.ParityShard))
 		_, err := std.BuildSmuxConfig(config.SmuxVer, config.SmuxBuf, config.StreamBuf, config.FrameSize, config.KeepAlive)
 		checkError(err)
 		if config.QPP {
@@ -307,6 +308,14 @@ func main() {
 
 		// Apply mode presets using the shared configuration helper.
 		config.ApplyMode()
+
+		// Derive the shared session key from the pre-shared secret.
+		log.Println("initiating key derivation")
+		pass := pbkdf2.Key([]byte(config.Key), []byte(SALT), 4096, 32, sha1.New)
+		log.Println("key derivation done")
+		block, effectiveCrypt := std.SelectBlockCrypt(config.Crypt, pass)
+		config.Crypt = effectiveCrypt
+		checkError(std.ValidateMTU(config.MTU, block, config.DataShard, config.ParityShard))
 
 		log.Println("version:", VERSION)
 		log.Println("smux version:", config.SmuxVer)
@@ -347,13 +356,6 @@ func main() {
 		if config.SmuxVer > maxSmuxVer {
 			log.Fatal("unsupported smux version:", config.SmuxVer)
 		}
-
-		// Derive the shared session key from the pre-shared secret.
-		log.Println("initiating key derivation")
-		pass := pbkdf2.Key([]byte(config.Key), []byte(SALT), 4096, 32, sha1.New)
-		log.Println("key derivation done")
-		block, effectiveCrypt := std.SelectBlockCrypt(config.Crypt, pass)
-		config.Crypt = effectiveCrypt
 
 		// Start the SNMP logger if the feature is enabled.
 		go std.SnmpLogger(config.SnmpLog, config.SnmpPeriod)
@@ -409,13 +411,14 @@ func main() {
 		wg.Wait()
 		return nil
 	}
-	myApp.Run(os.Args)
+	checkError(myApp.Run(os.Args))
 }
 
 // serveListener drains incoming KCP conversations from lis and dispatches each
 // one to handleMux while keeping wg accounting balanced.
 func serveListener(lis *kcp.Listener, _Q_ *qpp.QuantumPermutationPad, config *Config, wg *sync.WaitGroup) {
 	defer wg.Done()
+	defer lis.Close()
 	if err := lis.SetDSCP(config.DSCP); err != nil {
 		log.Println("SetDSCP:", err)
 	}
@@ -432,13 +435,19 @@ func serveListener(lis *kcp.Listener, _Q_ *qpp.QuantumPermutationPad, config *Co
 		conn, err := lis.AcceptKCP()
 		if err != nil {
 			log.Printf("%+v", err)
-			continue
+			// KCP stops its monitor and latches socket read errors. Retrying
+			// AcceptKCP cannot recover this listener, even for a temporary error.
+			return
 		}
 		log.Println("remote address:", conn.RemoteAddr())
 		conn.SetStreamMode(true)
 		conn.SetWriteDelay(false)
 		conn.SetNoDelay(config.NoDelay, config.Interval, config.Resend, config.NoCongestion)
-		conn.SetMtu(config.MTU)
+		if !conn.SetMtu(config.MTU) {
+			log.Printf("invalid MTU: %d", config.MTU)
+			conn.Close()
+			continue
+		}
 		conn.SetWindowSize(config.SndWnd, config.RcvWnd)
 		conn.SetACKNoDelay(config.AckNodelay)
 		conn.SetRateLimit(uint32(config.RateLimit))
