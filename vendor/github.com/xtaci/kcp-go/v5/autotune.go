@@ -26,22 +26,16 @@ import (
 	"sort"
 )
 
-const maxAutoTuneSamples = 258 // 256 + 2 extra samples for edge detection
+const maxAutoTuneSamples = 258 // 256 + 2 extra for edge detection
 
-// pulse represents a single sample in the signal stream: a boolean bit
-// (data=true, parity=false) tagged with its FEC sequence number.
+// pulse represents a 0/1 signal with time sequence
 type pulse struct {
-	bit bool   // true = data shard, false = parity shard
-	seq uint32 // FEC sequence number of this packet
+	bit bool   // 0 or 1
+	seq uint32 // sequence of the signal
 }
 
-// autoTune detects the repeating period of data and parity shards in the
-// incoming FEC stream. This allows the decoder to auto-detect the peer's
-// dataShards/parityShards configuration.
-//
-// Algorithm: collect recent samples into a ring buffer, sort by sequence,
-// then scan for the first complete pulse (rising edge -> falling edge)
-// of the target signal. The pulse width equals the shard count.
+// autoTune object to detect pulses in a signal
+// Uses a fixed-size ring buffer instead of heap to avoid allocations
 type autoTune struct {
 	pulses    [maxAutoTuneSamples]pulse // fixed-size array to avoid heap allocations
 	sortCache [maxAutoTuneSamples]pulse // reusable cache for sorting to avoid allocations
@@ -64,30 +58,21 @@ func (tune *autoTune) Sample(bit bool, seq uint32) {
 	}
 }
 
-// FindPeriod detects the period (pulse width) of the given signal type
-// in the collected samples. Returns -1 if no valid period is found.
+// Find a period for a given signal
+// returns -1 if not found
 //
-// For bit=true (data shards), it finds how many consecutive data shards
-// appear before a parity shard, giving us the dataShards count.
-// For bit=false (parity shards), it gives the parityShards count.
 //
-// The detection works by finding a complete pulse in the sorted sequence:
-//  1. Find the "left edge": where the signal transitions TO the target bit
-//  2. Find the "right edge": where the signal transitions AWAY from the target bit
-//  3. The period = rightEdge - leftEdge
-//
-// Example signal (bit=true looking for data period):
-//
-//	Signal Level
-//	    |
-//	1.0 |                 _____           _____
-//	    |                |     |         |     |
-//	0.5 |      _____     |     |   _____ |     |   _____
-//	    |     |     |    |     |  |     ||     |  |     |
-//	0.0 |_____|     |____|     |__|     ||     |__|     |_____
-//	    |
-//	    |-----------------------------------------------------> Time
-//	         A     B    C     D  E     F     G  H     I
+//   Signal Level
+//       |
+// 1.0   |                 _____           _____
+//       |                |     |         |     |
+// 0.5   |      _____     |     |   _____ |     |   _____
+//       |     |     |    |     |  |     ||     |  |     |
+// 0.0 __|_____|     |____|     |__|     ||     |__|     |_____
+//       |
+//       |-----------------------------------------------------> Time
+//            A     B    C     D  E     F     G  H     I
+
 func (tune *autoTune) FindPeriod(bit bool) int {
 	// Need at least 3 samples to detect a period (rising and falling edges)
 	if tune.count < 3 {

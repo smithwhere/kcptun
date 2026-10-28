@@ -48,14 +48,13 @@ import (
 	"github.com/klauspost/reedsolomon"
 )
 
-// FEC (Forward Error Correction) protocol constants
 const (
-	fecHeaderSize      = 6                 // FEC header: seqid(4B) + type(2B)
-	fecHeaderSizePlus2 = fecHeaderSize + 2 // FEC header + 2B payload size field
-	typeData           = 0xf1              // FEC packet type: data shard
-	typeParity         = 0xf2              // FEC packet type: parity shard
-	typeOOB            = 0xf3              // FEC packet type: out-of-band (unreliable)
-	maxShardSets       = 3                 // max concurrent shard sets before discarding old ones
+	fecHeaderSize      = 6
+	fecHeaderSizePlus2 = fecHeaderSize + 2 // plus 2B data size
+	typeData           = 0xf1
+	typeParity         = 0xf2
+	typeOOB            = 0xf3
+	maxShardSets       = 3
 )
 
 // fecPacket is a decoded FEC packet
@@ -105,9 +104,7 @@ func (h *shardHeap) Has(sn uint32) bool {
 	return exists
 }
 
-// fecDecoder for decoding incoming packets.
-// It collects shards grouped by shard ID and attempts Reed-Solomon recovery
-// when enough shards have been received.
+// fecDecoder for decoding incoming packets
 type fecDecoder struct {
 	dataShards   int
 	parityShards int
@@ -126,10 +123,9 @@ type fecDecoder struct {
 	// RS decoder
 	codec reedsolomon.Encoder
 
-	// auto-tuning: dynamically adjusts dataShards/parityShards ratio
-	// by detecting the period of data vs parity pulses in the incoming stream
+	// auto tune fec parameter
 	autoTune   autoTune
-	shouldTune bool // true when a type mismatch is detected, triggering auto-tune
+	shouldTune bool
 }
 
 func newFECDecoder(dataShards, parityShards int) *fecDecoder {
@@ -182,11 +178,10 @@ func (dec *fecDecoder) decode(in fecPacket) (recovered [][]byte) {
 		}
 	}
 
-	// perform auto-tuning if the decoder detects packet type mismatches.
-	// This means the peer has changed FEC parameters and we must adapt.
+	// perform auto-tuning if the decoder is out of sync.
 	if dec.shouldTune {
-		autoDS := dec.autoTune.FindPeriod(true)  // detect data shard period
-		autoPS := dec.autoTune.FindPeriod(false) // detect parity shard period
+		autoDS := dec.autoTune.FindPeriod(true)
+		autoPS := dec.autoTune.FindPeriod(false)
 
 		// validate the auto-tuned parameters
 		if autoDS > 0 && autoPS > 0 && autoDS+autoPS < 256 {

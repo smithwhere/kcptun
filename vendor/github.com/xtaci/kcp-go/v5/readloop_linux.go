@@ -33,11 +33,10 @@ import (
 )
 
 const (
-	batchSize = 256 // max packets per recvmmsg/sendmmsg call
+	batchSize = 256
 )
 
-// readLoop is the optimized read loop for Linux, utilizing the recvmmsg syscall
-// to batch-receive multiple UDP packets in a single system call.
+// readLoop is the optimized version of readLoop for linux utilizing recvmmsg syscall
 func (s *UDPSession) readLoop() {
 	// default version
 	if s.platform.batchConn == nil {

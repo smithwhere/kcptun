@@ -34,7 +34,7 @@ import (
 	"golang.org/x/sys/cpu"
 )
 
-const reseedInterval = 1 << 24 // reseed after ~16M reads to limit key exposure
+const reseedInterval = 1 << 24
 
 var (
 	hasAESAsmAMD64 = cpu.X86.HasAES && cpu.X86.HasSSE41 && cpu.X86.HasSSSE3
