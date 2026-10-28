@@ -56,3 +56,29 @@ func TestValidateMTUBoundaries(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateRateLimit(t *testing.T) {
+	for _, tt := range []struct {
+		rate int
+		bad  bool
+	}{
+		{0, false},
+		{1, false},
+		{1000000, false},
+		{-1, true},
+	} {
+		if err := ValidateRateLimit(tt.rate); (err != nil) != tt.bad {
+			t.Errorf("ValidateRateLimit(%d) = %v, want bad=%v", tt.rate, err, tt.bad)
+		}
+	}
+	maxRate := uint64(^uint32(0))
+	if uint64(^uint(0)>>1) > maxRate {
+		for _, value := range []uint64{maxRate, maxRate + 1} {
+			rate := int(value)
+			invalid := value > maxRate
+			if err := ValidateRateLimit(rate); (err != nil) != invalid {
+				t.Errorf("ValidateRateLimit(%d) = %v, want invalid=%v", rate, err, invalid)
+			}
+		}
+	}
+}

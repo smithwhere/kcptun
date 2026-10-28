@@ -250,7 +250,7 @@ func main() {
 		},
 		cli.BoolFlag{
 			Name:  "pprof",
-			Usage: "start profiling server on :6060",
+			Usage: "start profiling server on 127.0.0.1:6060",
 		},
 	}
 	myApp.Action = func(c *cli.Context) error {
@@ -312,6 +312,7 @@ func main() {
 			log.Printf("ratelimit %d is negative, falling back to 0", config.RateLimit)
 			config.RateLimit = 0
 		}
+		checkError(std.ValidateRateLimit(config.RateLimit))
 
 		// Redirect logs when the user supplied a dedicated log file.
 		if config.Log != "" {
@@ -406,7 +407,7 @@ func main() {
 		// Optionally expose Go's net/http/pprof handlers on :6060.
 		if config.Pprof {
 			go func() {
-				if err := http.ListenAndServe(":6060", nil); err != nil {
+				if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
 					log.Println("pprof server:", err)
 				}
 			}()
@@ -505,6 +506,7 @@ func createConn(config *Config, block kcp.BlockCrypt) (*smux.Session, error) {
 		session, err = smux.Client(std.NewCompStream(kcpconn), smuxConfig)
 	}
 	if err != nil {
+		kcpconn.Close()
 		return nil, errors.Wrap(err, "createConn()")
 	}
 	return session, nil

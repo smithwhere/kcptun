@@ -50,6 +50,12 @@ class InvalidConfigTests(unittest.TestCase):
                 with self.subTest(binary=binary, data=data, parity=parity):
                     self.assert_rejected(binary, {'datashard': data, 'parityshard': parity}, 'FEC')
 
+    def test_both_endpoints_reject_rate_limit_overflow(self):
+        for binary in (args.client, args.server):
+            for rate in (4294967296, 8589934592):
+                with self.subTest(binary=binary, rate=rate):
+                    self.assert_rejected(binary, {'ratelimit': rate}, 'ratelimit')
+
     def test_both_endpoints_reject_bad_mtu(self):
         for binary in (args.client, args.server):
             for mtu in (0, 40, 77, 1501):

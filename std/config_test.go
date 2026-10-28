@@ -120,3 +120,34 @@ func TestParseJSONConfigMissingFile(t *testing.T) {
 		t.Error("ParseJSONConfig should fail for missing file")
 	}
 }
+
+func TestParseJSONConfigRejectsTrailingContent(t *testing.T) {
+	for _, content := range []string{
+		"{\"mtu\":1350} {\"key\":\"ignored\"}",
+		"{\"mtu\":1350} trailing garbage",
+	} {
+		t.Run(content, func(t *testing.T) {
+			path := t.TempDir() + "/config.json"
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := ParseJSONConfig(&BaseConfig{}, path); err == nil {
+				t.Fatal("expected trailing JSON to be rejected")
+			}
+		})
+	}
+}
+
+func TestParseJSONConfigAllowsTrailingWhitespace(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	if err := os.WriteFile(path, []byte("{\"mtu\":1350}  \n\t"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var config BaseConfig
+	if err := ParseJSONConfig(&config, path); err != nil {
+		t.Fatal(err)
+	}
+	if config.MTU != 1350 {
+		t.Fatalf("unexpected MTU %d", config.MTU)
+	}
+}

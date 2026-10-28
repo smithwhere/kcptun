@@ -223,7 +223,7 @@ func main() {
 		},
 		cli.BoolFlag{
 			Name:  "pprof",
-			Usage: "start profiling server on :6060",
+			Usage: "start profiling server on 127.0.0.1:6060",
 		},
 		cli.StringFlag{
 			Name:  "log",
@@ -297,6 +297,7 @@ func main() {
 			log.Printf("ratelimit %d is negative, falling back to 0", config.RateLimit)
 			config.RateLimit = 0
 		}
+		checkError(std.ValidateRateLimit(config.RateLimit))
 
 		// Redirect logs when the user supplied a dedicated log file.
 		if config.Log != "" {
@@ -363,7 +364,7 @@ func main() {
 		// Start the pprof server if the feature is enabled.
 		if config.Pprof {
 			go func() {
-				if err := http.ListenAndServe(":6060", nil); err != nil {
+				if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
 					log.Println("pprof server:", err)
 				}
 			}()
@@ -487,6 +488,7 @@ func handleMux(_Q_ *qpp.QuantumPermutationPad, conn net.Conn, config *Config) {
 	mux, err := smux.Server(conn, smuxConfig)
 	if err != nil {
 		log.Println(err)
+		conn.Close()
 		return
 	}
 	defer mux.Close()
