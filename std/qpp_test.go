@@ -10,6 +10,29 @@ import (
 	"github.com/xtaci/qpp"
 )
 
+func TestValidateQPPParamsCountBounds(t *testing.T) {
+	for _, tt := range []struct {
+		count   int
+		wantErr bool
+	}{
+		{-1, true},
+		{0, true},
+		{1, false},
+		{61, false},
+		{65535, false},
+		{65536, true},
+		{65537, true},
+		{131072, true},
+	} {
+		t.Run(fmt.Sprint(tt.count), func(t *testing.T) {
+			_, err := ValidateQPPParams(tt.count, "regression-test-key")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateQPPParams(%d) error = %v, wantErr %t", tt.count, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestQPPPortRoundTrip(t *testing.T) {
 	pad := qpp.NewQPP([]byte("pad-seed"), 16)
 	seed := []byte("session-seed")

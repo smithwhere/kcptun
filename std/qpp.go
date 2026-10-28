@@ -37,8 +37,8 @@ const qppPower = 8
 // fatal error when the configuration is invalid. Non-fatal issues are reported
 // via warnings so the caller can keep running while still alerting the user.
 func ValidateQPPParams(count int, key string) ([]string, error) {
-	if count <= 0 {
-		return nil, fmt.Errorf("QPPCount must be greater than 0 when QPP is enabled")
+	if count <= 0 || count > 65535 {
+		return nil, fmt.Errorf("QPPCount must be between 1 and 65535 when QPP is enabled")
 	}
 
 	var warnings []string
