@@ -121,7 +121,7 @@ func main() {
 			Value: 1350,
 			Usage: "set maximum transmission unit for UDP packets",
 		},
-		cli.IntFlag{
+		cli.Int64Flag{
 			Name:  "ratelimit",
 			Value: 0,
 			Usage: "set maximum outgoing speed (in bytes per second) for a single KCP connection, 0 to disable. Also known as packet pacing.",
@@ -252,7 +252,7 @@ func main() {
 		config.Crypt = c.String("crypt")
 		config.Mode = c.String("mode")
 		config.MTU = c.Int("mtu")
-		config.RateLimit = c.Int("ratelimit")
+		config.RateLimit = c.Int64("ratelimit")
 		config.SndWnd = c.Int("sndwnd")
 		config.RcvWnd = c.Int("rcvwnd")
 		config.DataShard = c.Int("datashard")
@@ -298,6 +298,7 @@ func main() {
 			config.RateLimit = 0
 		}
 		checkError(std.ValidateRateLimit(config.RateLimit))
+		checkError(std.ValidateSnmpPeriod(config.SnmpLog, config.SnmpPeriod))
 
 		// Redirect logs when the user supplied a dedicated log file.
 		if config.Log != "" {

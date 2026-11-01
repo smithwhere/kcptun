@@ -24,7 +24,7 @@ func ValidateFECParams(data, parity int) error {
 
 // ValidateRateLimit protects the uint32 conversion passed to kcp-go.
 // Values exceeding uint32 would wrap and silently disable/alter pacing.
-func ValidateRateLimit(rate int) error {
+func ValidateRateLimit(rate int64) error {
 	const maxRate = uint64(^uint32(0))
 	if rate < 0 || uint64(rate) > maxRate {
 		return fmt.Errorf("ratelimit must be between 0 and %d", maxRate)

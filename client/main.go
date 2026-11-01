@@ -31,6 +31,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -130,7 +131,7 @@ func main() {
 			Value: 1350,
 			Usage: "set maximum transmission unit for UDP packets",
 		},
-		cli.IntFlag{
+		cli.Int64Flag{
 			Name:  "ratelimit",
 			Value: 0,
 			Usage: "set maximum outgoing speed (in bytes per second) for a single KCP connection, 0 to disable. Also known as packet pacing",
@@ -264,7 +265,7 @@ func main() {
 		config.AutoExpire = c.Int("autoexpire")
 		config.ScavengeTTL = c.Int("scavengettl")
 		config.MTU = c.Int("mtu")
-		config.RateLimit = c.Int("ratelimit")
+		config.RateLimit = c.Int64("ratelimit")
 		config.SndWnd = c.Int("sndwnd")
 		config.RcvWnd = c.Int("rcvwnd")
 		config.DataShard = c.Int("datashard")
@@ -313,6 +314,7 @@ func main() {
 			config.RateLimit = 0
 		}
 		checkError(std.ValidateRateLimit(config.RateLimit))
+		checkError(std.ValidateSnmpPeriod(config.SnmpLog, config.SnmpPeriod))
 
 		// Redirect logs when the user supplied a dedicated log file.
 		if config.Log != "" {
@@ -422,6 +424,7 @@ func main() {
 		// Accept TCP/UNIX clients and multiplex them across the UDP tunnels.
 		numconn := uint16(config.Conn)
 		muxes := make([]timedSession, numconn)
+		slots := make([]sync.Mutex, numconn)
 		// rr tracks which pre-established session should carry the next client so
 		// short-lived TCP dials do not hammer the same UDP tunnel.
 		rr := uint16(0)
@@ -440,20 +443,28 @@ func main() {
 				log.Fatalf("%+v", err)
 			}
 			idx := rr % numconn
+			rr = (rr + 1) % numconn
+			dispatchSlot(&slots[idx], p1, func() {
 
-			// Refresh the selected session if it is missing, closed, or past its TTL.
-			if muxes[idx].session == nil || muxes[idx].session.IsClosed() ||
-				(config.AutoExpire > 0 && time.Now().After(muxes[idx].expiryDate)) {
-				muxes[idx].session = waitConn(&config, block)
-				muxes[idx].expiryDate = time.Now().Add(time.Duration(config.AutoExpire) * time.Second)
-				if config.AutoExpire > 0 { // only track TTL when auto-expiration is enabled
-					chScavenger <- muxes[idx]
+				// Refresh the selected session if it is missing, closed, or past its TTL.
+				if muxes[idx].session == nil || muxes[idx].session.IsClosed() ||
+					(config.AutoExpire > 0 && time.Now().After(muxes[idx].expiryDate)) {
+					session, err := createConn(&config, block)
+					if err != nil {
+						log.Println("connect:", err)
+						p1.Close()
+						return
+					}
+					muxes[idx].session = session
+					muxes[idx].expiryDate = time.Now().Add(time.Duration(config.AutoExpire) * time.Second)
+					if config.AutoExpire > 0 { // only track TTL when auto-expiration is enabled
+						chScavenger <- muxes[idx]
+					}
 				}
-			}
 
-			// Serve the accepted client in its own goroutine to keep the accept loop responsive.
-			go handleClient(_Q_, []byte(config.Key), muxes[idx].session, p1, config.Quiet, config.CloseWait)
-			rr++
+				// Serve the accepted client in its own goroutine to keep the accept loop responsive.
+				go handleClient(_Q_, []byte(config.Key), muxes[idx].session, p1, config.Quiet, config.CloseWait)
+			})
 		}
 	}
 	checkError(myApp.Run(os.Args))
@@ -510,18 +521,6 @@ func createConn(config *Config, block kcp.BlockCrypt) (*smux.Session, error) {
 		return nil, errors.Wrap(err, "createConn()")
 	}
 	return session, nil
-}
-
-// waitConn keeps dialing until a healthy smux session becomes available.
-func waitConn(config *Config, block kcp.BlockCrypt) *smux.Session {
-	for {
-		session, err := createConn(config, block)
-		if err == nil {
-			return session
-		}
-		log.Println("re-connecting:", err)
-		time.Sleep(time.Second)
-	}
 }
 
 // handleClient tunnels a single accepted TCP/UNIX client through an smux
