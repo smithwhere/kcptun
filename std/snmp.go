@@ -24,6 +24,7 @@ package std
 
 import (
 	"encoding/csv"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -35,6 +36,10 @@ import (
 
 func SnmpLogger(path string, interval int) {
 	if path == "" || interval <= 0 {
+		return
+	}
+	if err := ValidateSnmpPeriod(path, interval); err != nil {
+		log.Println(err)
 		return
 	}
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
@@ -71,4 +76,13 @@ func writeSnmpRecord(path string) error {
 	}
 	w.Flush()
 	return w.Error()
+}
+
+// ValidateSnmpPeriod checks the conversion to nanoseconds before starting a ticker.
+// Empty paths and nonpositive intervals retain the existing disabled behavior.
+func ValidateSnmpPeriod(path string, interval int) error {
+	if path != "" && int64(interval) > int64((1<<63-1)/time.Second) {
+		return fmt.Errorf("snmpperiod exceeds duration range")
+	}
+	return nil
 }

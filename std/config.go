@@ -36,7 +36,7 @@ type BaseConfig struct {
 	Crypt        string `json:"crypt"`
 	Mode         string `json:"mode"`
 	MTU          int    `json:"mtu"`
-	RateLimit    int    `json:"ratelimit"`
+	RateLimit    int64  `json:"ratelimit"`
 	SndWnd       int    `json:"sndwnd"`
 	RcvWnd       int    `json:"rcvwnd"`
 	DataShard    int    `json:"datashard"`
