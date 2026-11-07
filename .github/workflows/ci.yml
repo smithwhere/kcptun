@@ -20,6 +20,8 @@ jobs:
           cache: true
       - name: Unit tests with race detector
         run: go test -race -mod=vendor -timeout 120s ./...
+      - name: Vendored transport tests with race detector
+        run: go test -race -mod=vendor -timeout 120s ./vendor/github.com/xtaci/smux ./vendor/github.com/xtaci/tcpraw ./vendor/github.com/coreos/go-iptables/iptables
       - name: Static analysis
         run: go vet -mod=vendor ./...
       - name: Build integration-test binaries
