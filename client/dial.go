@@ -23,19 +23,28 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/pkg/errors"
-	kcp "github.com/xtaci/kcp-go/v5"
 	"github.com/smithwhere/kcptun/std"
+	kcp "github.com/xtaci/kcp-go/v5"
 	"github.com/xtaci/tcpraw"
 )
 
 // dial establishes a connection to the configured remote endpoint.
 func dial(config *Config, block kcp.BlockCrypt) (*kcp.UDPSession, error) {
+	return dialContext(context.Background(), config, block)
+}
+
+func dialContext(ctx context.Context, config *Config, block kcp.BlockCrypt) (*kcp.UDPSession, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// The address belongs to this configuration, not to the process. Caching
 	// it globally would silently route later calls to an earlier remote.
 	multiPort, err := std.ParseMultiPort(config.RemoteAddr)
@@ -50,11 +59,19 @@ func dial(config *Config, block kcp.BlockCrypt) (*kcp.UDPSession, error) {
 		return nil, err
 	}
 
-	remoteAddr := fmt.Sprintf("%v:%v", multiPort.Host, uint64(multiPort.MinPort)+randport%uint64(multiPort.MaxPort-multiPort.MinPort+1))
+	port := uint64(multiPort.MinPort) + randport%uint64(multiPort.MaxPort-multiPort.MinPort+1)
+	host := strings.TrimSuffix(strings.TrimPrefix(multiPort.Host, "["), "]")
+	remoteAddr, err := resolveRemote(ctx, net.DefaultResolver, host, port)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Use tcpraw to emulate a TCP transport when requested.
 	if config.TCP {
-		conn, err := tcpraw.Dial("tcp", remoteAddr)
+		conn, err := tcpraw.DialContext(ctx, "tcp", remoteAddr)
 		if err != nil {
 			return nil, errors.Wrap(err, "tcpraw.Dial()")
 		}
@@ -81,4 +98,26 @@ func dial(config *Config, block kcp.BlockCrypt) (*kcp.UDPSession, error) {
 
 	// Otherwise fall back to the standard UDP dialing path.
 	return kcp.DialWithOptions(remoteAddr, block, config.DataShard, config.ParityShard)
+}
+
+func resolveRemote(ctx context.Context, resolver *net.Resolver, host string, port uint64) (string, error) {
+	ips, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	if len(ips) == 0 {
+		return "", fmt.Errorf("no address for %s", host)
+	}
+	selected := preferredIP(ips)
+	return net.JoinHostPort(selected.String(), fmt.Sprint(port)), nil
+}
+
+// Match Go ResolveUDPAddr/ResolveTCPAddr: prefer IPv4 for hostnames.
+func preferredIP(ips []net.IPAddr) net.IPAddr {
+	for _, ip := range ips {
+		if ip.IP.To4() != nil {
+			return ip
+		}
+	}
+	return ips[0]
 }

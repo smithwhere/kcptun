@@ -16,6 +16,7 @@ package iptables
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -24,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Adds the output of stderr to exec.ExitError
@@ -130,7 +132,9 @@ func Path(path string) option {
 // the IPFamily and Timeout options as follow:
 //
 //	ip6t := New(IPFamily(ProtocolIPv6), Timeout(5))
-func New(opts ...option) (*IPTables, error) {
+func New(opts ...option) (*IPTables, error) { return NewContext(context.Background(), opts...) }
+
+func NewContext(parent context.Context, opts ...option) (*IPTables, error) {
 
 	ipt := &IPTables{
 		proto:   ProtocolIPv4,
@@ -155,9 +159,9 @@ func New(opts ...option) (*IPTables, error) {
 	}
 	ipt.path = path
 
-	vstring, err := getIptablesVersionString(path)
+	vstring, err := getIptablesVersionStringContext(parent, path)
 	if err != nil {
-		return nil, fmt.Errorf("could not get iptables version: %v", err)
+		return nil, fmt.Errorf("could not get iptables version: %w", err)
 	}
 	v1, v2, v3, mode, err := extractIptablesVersion(vstring)
 	if err != nil {
@@ -190,12 +194,16 @@ func (ipt *IPTables) Proto() Protocol {
 
 // Exists checks if given rulespec in specified table/chain exists
 func (ipt *IPTables) Exists(table, chain string, rulespec ...string) (bool, error) {
+	return ipt.ExistsContext(context.Background(), table, chain, rulespec...)
+}
+
+func (ipt *IPTables) ExistsContext(ctx context.Context, table, chain string, rulespec ...string) (bool, error) {
 	if !ipt.hasCheck {
-		return ipt.existsForOldIptables(table, chain, rulespec)
+		return ipt.existsForOldIptablesContext(ctx, table, chain, rulespec)
 
 	}
 	cmd := append([]string{"-t", table, "-C", chain}, rulespec...)
-	err := ipt.run(cmd...)
+	err := ipt.runWithOutputContext(ctx, cmd, nil)
 	eerr, eok := err.(*Error)
 	switch {
 	case err == nil:
@@ -235,8 +243,11 @@ func (ipt *IPTables) InsertUnique(table, chain string, pos int, rulespec ...stri
 
 // Append appends rulespec to specified table/chain
 func (ipt *IPTables) Append(table, chain string, rulespec ...string) error {
+	return ipt.AppendContext(context.Background(), table, chain, rulespec...)
+}
+func (ipt *IPTables) AppendContext(ctx context.Context, table, chain string, rulespec ...string) error {
 	cmd := append([]string{"-t", table, "-A", chain}, rulespec...)
-	return ipt.run(cmd...)
+	return ipt.runWithOutputContext(ctx, cmd, nil)
 }
 
 // AppendUnique acts like Append except that it won't add a duplicate
@@ -563,6 +574,13 @@ func (ipt *IPTables) run(args ...string) error {
 // runWithOutput runs an iptables command with the given arguments,
 // writing any stdout output to the given writer
 func (ipt *IPTables) runWithOutput(args []string, stdout io.Writer) error {
+	return ipt.runWithOutputContext(context.Background(), args, stdout)
+}
+
+func (ipt *IPTables) runWithOutputContext(parent context.Context, args []string, stdout io.Writer) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
 	args = append([]string{ipt.path}, args...)
 	if ipt.hasWait {
 		args = append(args, "--wait")
@@ -585,17 +603,19 @@ func (ipt *IPTables) runWithOutput(args []string, stdout io.Writer) error {
 	}
 
 	var stderr bytes.Buffer
-	cmd := exec.Cmd{
-		Path:   ipt.path,
-		Args:   args,
-		Stdout: stdout,
-		Stderr: &stderr,
-	}
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ipt.path, args[1:]...)
+	cmd.WaitDelay = 250 * time.Millisecond
+	cmd.Stdout, cmd.Stderr = stdout, &stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		switch e := err.(type) {
 		case *exec.ExitError:
-			return &Error{*e, cmd, stderr.String(), nil}
+			return &Error{*e, *cmd, stderr.String(), nil}
 		default:
 			return err
 		}
@@ -652,11 +672,21 @@ func extractIptablesVersion(str string) (int, int, int, string, error) {
 
 // Runs "iptables --version" to get the version string
 func getIptablesVersionString(path string) (string, error) {
-	cmd := exec.Command(path, "--version")
+	return getIptablesVersionStringContext(context.Background(), path)
+}
+
+func getIptablesVersionStringContext(parent context.Context, path string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "--version")
+	cmd.WaitDelay = 250 * time.Millisecond
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", err
 	}
 	return out.String(), nil
@@ -717,10 +747,14 @@ func iptablesHasRandomFully(v1 int, v2 int, v3 int) bool {
 
 // Checks if a rule specification exists for a table
 func (ipt *IPTables) existsForOldIptables(table, chain string, rulespec []string) (bool, error) {
+	return ipt.existsForOldIptablesContext(context.Background(), table, chain, rulespec)
+}
+
+func (ipt *IPTables) existsForOldIptablesContext(ctx context.Context, table, chain string, rulespec []string) (bool, error) {
 	rs := strings.Join(append([]string{"-A", chain}, rulespec...), " ")
 	args := []string{"-t", table, "-S"}
 	var stdout bytes.Buffer
-	err := ipt.runWithOutput(args, &stdout)
+	err := ipt.runWithOutputContext(ctx, args, &stdout)
 	if err != nil {
 		return false, err
 	}

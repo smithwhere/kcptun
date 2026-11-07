@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/xtaci/qpp"
 )
@@ -105,5 +107,157 @@ func TestQPPPortWritePreservesInput(t *testing.T) {
 	pad.DecryptWithPRNG(received, qpp.CreatePRNG([]byte("stream-seed")))
 	if !bytes.Equal(received, bytes.Repeat(original, 2)) {
 		t.Fatal("repeated writes did not decrypt to the original plaintext")
+	}
+}
+
+type partialQPPSink struct {
+	bytes.Buffer
+	first bool
+}
+
+func (s *partialQPPSink) Write(p []byte) (int, error) {
+	if !s.first {
+		s.first = true
+		n, _ := s.Buffer.Write(p[:4])
+		return n, io.ErrShortWrite
+	}
+	return s.Buffer.Write(p)
+}
+func (s *partialQPPSink) Close() error { return nil }
+func TestQPPPortPartialWriteRetryStaysSynchronized(t *testing.T) {
+	sink := &partialQPPSink{}
+	pad := qpp.NewQPP([]byte("pad-seed"), 61)
+	seed := []byte("stream-seed")
+	port := NewQPPPort(sink, pad, seed)
+	payload := []byte("retry must preserve every byte")
+	n, err := port.Write(payload)
+	if n != 4 || err != io.ErrShortWrite {
+		t.Fatalf("first write: %d %v", n, err)
+	}
+	if n2, err := port.Write(payload[n:]); err != nil || n2 != len(payload)-n {
+		t.Fatalf("retry: %d %v", n2, err)
+	}
+	got := append([]byte(nil), sink.Bytes()...)
+	pad.DecryptWithPRNG(got, qpp.CreatePRNG(seed))
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("decrypt after partial write: got %q want %q", got, payload)
+	}
+}
+
+type synchronizedQPPSink struct {
+	mu   sync.Mutex
+	data bytes.Buffer
+}
+
+func (s *synchronizedQPPSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.Write(p)
+}
+func (s *synchronizedQPPSink) Close() error             { return nil }
+func (s *synchronizedQPPSink) Read([]byte) (int, error) { return 0, io.EOF }
+func TestQPPPortConcurrentWritesRemainSynchronized(t *testing.T) {
+	pad := qpp.NewQPP([]byte("pad-seed"), 61)
+	seed := []byte("stream-seed")
+	sink := &synchronizedQPPSink{}
+	port := NewQPPPort(sink, pad, seed)
+	payload := bytes.Repeat([]byte("x"), 512)
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n, err := port.Write(payload)
+			if err != nil || n != len(payload) {
+				t.Errorf("write: %d %v", n, err)
+			}
+		}()
+	}
+	wg.Wait()
+	got := append([]byte(nil), sink.data.Bytes()...)
+	pad.DecryptWithPRNG(got, qpp.CreatePRNG(seed))
+	if !bytes.Equal(got, bytes.Repeat(payload, 32)) {
+		t.Fatal("concurrent writes desynchronized stream")
+	}
+}
+
+type synchronizedQPPSource struct {
+	mu   sync.Mutex
+	data *bytes.Reader
+}
+
+func (s *synchronizedQPPSource) Read(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.Read(p)
+}
+func (s *synchronizedQPPSource) Write(p []byte) (int, error) { return len(p), nil }
+func (s *synchronizedQPPSource) Close() error                { return nil }
+func TestQPPPortConcurrentReadsRemainSynchronized(t *testing.T) {
+	pad := qpp.NewQPP([]byte("pad-seed"), 61)
+	seed := []byte("stream-seed")
+	payload := bytes.Repeat([]byte("x"), 512*32)
+	encrypted := append([]byte(nil), payload...)
+	pad.EncryptWithPRNG(encrypted, qpp.CreatePRNG(seed))
+	port := NewQPPPort(&synchronizedQPPSource{data: bytes.NewReader(encrypted)}, pad, seed)
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 512)
+			n, err := io.ReadFull(port, buf)
+			if err != nil || n != len(buf) || !bytes.Equal(buf, bytes.Repeat([]byte("x"), 512)) {
+				t.Errorf("read corrupted: %d %v", n, err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestQPPPortBlockedReadDoesNotBlockWrite(t *testing.T) {
+	pad := qpp.NewQPP([]byte("pad-seed"), 61)
+	seed := []byte("stream-seed")
+	a, b := net.Pipe()
+	left := NewQPPPort(a, pad, seed)
+	right := NewQPPPort(b, pad, seed)
+	defer left.Close()
+	defer right.Close()
+	readStarted := make(chan struct{})
+	readDone := make(chan struct{})
+	go func() { close(readStarted); left.Read(make([]byte, 1)); close(readDone) }()
+	<-readStarted
+	got := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 5)
+		_, err := io.ReadFull(right, buf)
+		if err == nil && string(buf) != "hello" {
+			err = fmt.Errorf("got %q", buf)
+		}
+		got <- err
+	}()
+	wrote := make(chan error, 1)
+	go func() { _, err := left.Write([]byte("hello")); wrote <- err }()
+	select {
+	case err := <-wrote:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked read prevented write")
+	}
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("peer did not receive data")
+	}
+	right.Close()
+	select {
+	case <-readDone:
+	case <-time.After(time.Second):
+		t.Fatal("close did not unblock read")
 	}
 }

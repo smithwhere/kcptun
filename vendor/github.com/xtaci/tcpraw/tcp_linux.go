@@ -26,11 +26,14 @@ package tcpraw
 
 import (
 	"container/list"
-	"encoding/binary"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	"runtime"
 	"sync"
@@ -185,14 +188,18 @@ func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
 			continue
 		}
 
-		// address building
-		var src net.TCPAddr
-		src.IP = addr.IP
-		src.Port = int(tcp.SrcPort)
+		// Preserve the interface scope when matching link-local flows.
+		zone := handle.LocalAddr().(*net.IPAddr).Zone
+		if conn.tcpconn != nil {
+			if remote, ok := conn.tcpconn.RemoteAddr().(*net.TCPAddr); ok && remote.Zone != "" {
+				zone = remote.Zone
+			}
+		}
+		src := flowSourceAddress(addr, int(tcp.SrcPort), zone)
 
 		var orphan bool
 		// flow maintaince
-		conn.lockflow(&src, func(e *tcpFlow) {
+		conn.lockflow(src, func(e *tcpFlow) {
 			if e.conn == nil { // make sure it's related to net.TCPConn
 				orphan = true // mark as orphan if it's not related net.TCPConn
 			}
@@ -204,11 +211,8 @@ func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
 			}
 
 			// Parse TCP options to get Timestamp
-			for _, opt := range tcp.Options {
-				if opt.OptionType == layers.TCPOptionKindTimestamps && len(opt.OptionData) == 10 {
-					e.tsEcr = binary.BigEndian.Uint32(opt.OptionData[:4])
-					break
-				}
+			if ts, ok := timestampValue(tcp.Options); ok {
+				e.tsEcr = ts
 			}
 
 			// Update ACK
@@ -235,7 +239,7 @@ func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
 			payload := make([]byte, len(tcp.Payload))
 			copy(payload, tcp.Payload)
 			select {
-			case conn.chMessage <- message{payload, &src}:
+			case conn.chMessage <- message{payload, src}:
 			case <-conn.die:
 				return
 			}
@@ -279,7 +283,8 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	case <-conn.die:
 		return 0, io.EOF
 	default:
-		raddr, err := net.ResolveTCPAddr("tcp", addr.String())
+		var raddr *net.TCPAddr
+		raddr, err = net.ResolveTCPAddr("tcp", addr.String())
 		if err != nil {
 			return 0, err
 		}
@@ -327,15 +332,19 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			}
 
 			e.buf.Clear()
-			gopacket.SerializeLayers(e.buf, conn.opts, &e.tcpHeader, gopacket.Payload(p))
-			if conn.tcpconn != nil {
-				_, err = e.handle.Write(e.buf.Bytes())
-			} else {
-				_, err = e.handle.WriteToIP(e.buf.Bytes(), &net.IPAddr{IP: raddr.IP})
+			if err = gopacket.SerializeLayers(e.buf, conn.opts, &e.tcpHeader, gopacket.Payload(p)); err != nil {
+				return
 			}
-			// increase seq in flow
-			e.seq += uint32(len(p))
-			n = len(p)
+			if conn.tcpconn != nil {
+				n, err = writeRawFrame(len(p), e.buf.Bytes(), e.handle.Write)
+			} else {
+				n, err = writeRawFrame(len(p), e.buf.Bytes(), func(frame []byte) (int, error) {
+					return e.handle.WriteToIP(frame, &net.IPAddr{IP: raddr.IP, Zone: raddr.Zone})
+				})
+			}
+			if err == nil {
+				e.seq += uint32(len(p))
+			}
 		})
 	}
 	return
@@ -371,19 +380,51 @@ func (conn *tcpConn) Close() error {
 			conn.handles[k].Close()
 		}
 
-		// delete iptable
+		// Report cleanup failures to callers and logs; rules must not fail silently.
 		if conn.iptables != nil {
-			conn.iptables.Delete("filter", "OUTPUT", conn.iprule...)
+			if e := deleteFirewallRule(conn.iptables, conn.iprule); e != nil {
+				log.Printf("tcpraw: %v", e)
+				err = errors.Join(err, e)
+			}
 		}
 		if conn.ip6tables != nil {
-			conn.ip6tables.Delete("filter", "OUTPUT", conn.ip6rule...)
+			if e := deleteFirewallRule(conn.ip6tables, conn.ip6rule); e != nil {
+				log.Printf("tcpraw: %v", e)
+				err = errors.Join(err, e)
+			}
 		}
-
 		// remove from the global list
 		connListMu.Lock()
-		connList.Remove(conn.elem)
+		if conn.elem != nil {
+			connList.Remove(conn.elem)
+			conn.elem = nil
+		}
 		connListMu.Unlock()
 	})
+	return err
+}
+
+func (conn *tcpConn) setupFirewall(ipv6 bool, rule []string) error {
+	return conn.setupFirewallContext(context.Background(), ipv6, rule)
+}
+
+func (conn *tcpConn) setupFirewallContext(ctx context.Context, ipv6 bool, rule []string) error {
+	proto := iptables.ProtocolIPv4
+	if ipv6 {
+		proto = iptables.ProtocolIPv6
+	}
+	ipt, err := iptables.NewContext(ctx, iptables.IPFamily(proto))
+	if err != nil {
+		return fmt.Errorf("initialize firewall for protocol %v: %w", proto, err)
+	}
+	owned, err := installFirewallRuleContext(ctx, ipt, rule)
+	if owned {
+		if ipv6 {
+			conn.ip6tables, conn.ip6rule = ipt, rule
+		} else {
+			conn.iptables, conn.iprule = ipt, rule
+		}
+	}
 	return err
 }
 
@@ -455,28 +496,53 @@ func (conn *tcpConn) SetWriteBuffer(bytes int) error {
 // Dial connects to the remote TCP port,
 // and returns a single packet-oriented connection
 func Dial(network, address string) (*TCPConn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return DialContext(ctx, network, address)
+}
+
+func DialContext(ctx context.Context, network, address string) (*TCPConn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// remote address resolve
-	raddr, err := net.ResolveTCPAddr(network, address)
+	raddr, err := resolveTCPAddrContext(ctx, net.DefaultResolver, network, address)
 	if err != nil {
 		return nil, err
 	}
 
 	// AF_INET
-	handle, err := net.DialIP("ip:tcp", nil, &net.IPAddr{IP: raddr.IP})
+	rawHandle, err := (&net.Dialer{}).DialContext(ctx, "ip:tcp", rawDialAddress(raddr))
 	if err != nil {
 		return nil, err
+	}
+
+	handle, ok := rawHandle.(*net.IPConn)
+	if !ok {
+		rawHandle.Close()
+		return nil, fmt.Errorf("unexpected connection type %T", rawHandle)
 	}
 
 	// create an established tcp connection
 	// will hack this tcp connection for packet transmission
-	tcpconn, err := net.DialTCP(network, nil, raddr)
+	rawTCP, err := (&net.Dialer{}).DialContext(ctx, network, raddr.String())
 	if err != nil {
+		handle.Close()
 		return nil, err
 	}
 
+	tcpconn, ok := rawTCP.(*net.TCPConn)
+	if !ok {
+		rawTCP.Close()
+		handle.Close()
+		return nil, fmt.Errorf("unexpected connection type %T", rawTCP)
+	}
+
 	// parse local ip and port from tcpconn
-	laddr, lport, err := net.SplitHostPort(tcpconn.LocalAddr().String())
+	_, lport, err := net.SplitHostPort(tcpconn.LocalAddr().String())
 	if err != nil {
+		tcpconn.Close()
+		handle.Close()
 		return nil, err
 	}
 
@@ -504,28 +570,18 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	// setup iptables only when it's the first connection
-	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4); err == nil {
-		rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-s", laddr, "--sport", lport, "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
-		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
-			if !exists {
-				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
-					conn.iprule = rule
-					conn.iptables = ipt
-				}
-			}
-		}
+	// Only install the rule for the address family actually used.
+	ipv6 := raddr.IP.To4() == nil
+	match := []string{"-m", "ttl", "--ttl-eq", "1"}
+	if ipv6 {
+		match = []string{"-m", "hl", "--hl-eq", "1"}
 	}
-	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv6); err == nil {
-		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-s", laddr, "--sport", lport, "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
-		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
-			if !exists {
-				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
-					conn.ip6rule = rule
-					conn.ip6tables = ipt
-				}
-			}
-		}
+	rule := append(match, "-p", "tcp", "-s", tcpconn.LocalAddr().(*net.TCPAddr).IP.String(), "--sport", lport, "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP")
+	if err := conn.setupFirewallContext(ctx, ipv6, rule); err != nil {
+		return nil, errors.Join(err, conn.Close())
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(err, conn.Close())
 	}
 
 	// discard everything
@@ -571,7 +627,11 @@ func Listen(network, address string) (*TCPConn, error) {
 			if addrs, err := iface.Addrs(); err == nil {
 				for _, addr := range addrs {
 					if ipaddr, ok := addr.(*net.IPNet); ok {
-						if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: ipaddr.IP}); err == nil {
+						zone := ""
+						if ipaddr.IP.IsLinkLocalUnicast() && ipaddr.IP.To4() == nil {
+							zone = iface.Name
+						}
+						if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: ipaddr.IP, Zone: zone}); err == nil {
 							conn.handles = append(conn.handles, handle)
 							go conn.captureFlow(handle, laddr.Port)
 						} else {
@@ -585,7 +645,7 @@ func Listen(network, address string) (*TCPConn, error) {
 			return nil, lasterr
 		}
 	} else {
-		if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: laddr.IP}); err == nil {
+		if handle, err := net.ListenIP("ip:tcp", rawListenAddress(laddr)); err == nil {
 			conn.handles = append(conn.handles, handle)
 			go conn.captureFlow(handle, laddr.Port)
 		} else {
@@ -607,32 +667,40 @@ func Listen(network, address string) (*TCPConn, error) {
 	// start cleaner
 	go conn.cleaner()
 
-	// iptables drop packets marked with TTL = 1
-	// TODO: what if iptables is not available, the next hop will send back ICMP Time Exceeded,
-	// is this still an acceptable behavior?
-	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4); err == nil {
-		rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
-		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
-			if !exists {
-				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
-					conn.iprule = rule
-					conn.iptables = ipt
-				}
+	// Install rules for the address families covered by the listener.
+	need4, need6 := false, false
+	if laddr.IP != nil && !laddr.IP.IsUnspecified() {
+		need4 = laddr.IP.To4() != nil
+		need6 = !need4
+	} else {
+		for _, h := range conn.handles {
+			ip := h.LocalAddr().(*net.IPAddr).IP
+			if ip.To4() != nil && network != "tcp6" {
+				need4 = true
+			}
+			if ip.To4() == nil && network != "tcp4" {
+				need6 = true
 			}
 		}
 	}
-	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv6); err == nil {
-		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
-		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
-			if !exists {
-				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
-					conn.ip6rule = rule
-					conn.ip6tables = ipt
-				}
-			}
+	port := l.Addr().(*net.TCPAddr).Port
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return nil, errors.Join(err, conn.Close())
+	}
+	owner := "kcptun-" + hex.EncodeToString(token[:])
+	if need4 {
+		rule := listenerFirewallRule(false, laddr.IP, port, owner)
+		if err := conn.setupFirewall(false, rule); err != nil {
+			return nil, errors.Join(err, conn.Close())
 		}
 	}
-
+	if need6 {
+		rule := listenerFirewallRule(true, laddr.IP, port, owner)
+		if err := conn.setupFirewall(true, rule); err != nil {
+			return nil, errors.Join(err, conn.Close())
+		}
+	}
 	// discard everything in original connection
 	go func() {
 		for {
@@ -641,9 +709,9 @@ func Listen(network, address string) (*TCPConn, error) {
 				return
 			}
 
-			// if we cannot set TTL = 1, the only thing reasonable is panic
-			if err := setTTL(tcpconn, 1); err != nil {
-				panic(err)
+			if err := prepareAcceptedSocket(tcpconn, func() error { return setTTL(tcpconn, 1) }); err != nil {
+				log.Printf("tcpraw: configure accepted connection: %v", err)
+				continue
 			}
 
 			// record net.Conn
@@ -669,17 +737,12 @@ func setTTL(c *net.TCPConn, ttl int) error {
 		return err
 	}
 	addr := c.LocalAddr().(*net.TCPAddr)
-
-	if addr.IP.To4() == nil {
-		raw.Control(func(fd uintptr) {
-			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, ttl)
-		})
-	} else {
-		raw.Control(func(fd uintptr) {
-			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
-		})
-	}
-	return err
+	return controlSocket(raw, func(fd uintptr) error {
+		if addr.IP.To4() == nil {
+			return syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, ttl)
+		}
+		return syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
+	})
 }
 
 // setDSCP sets the 6bit DSCP field in IPv4 header, or 8bit Traffic Class in IPv6 header.
@@ -689,17 +752,12 @@ func setDSCP(c *net.IPConn, dscp int) error {
 		return err
 	}
 	addr := c.LocalAddr().(*net.IPAddr)
-
-	if addr.IP.To4() == nil {
-		raw.Control(func(fd uintptr) {
-			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, dscp)
-		})
-	} else {
-		raw.Control(func(fd uintptr) {
-			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TOS, dscp<<2)
-		})
-	}
-	return err
+	return controlSocket(raw, func(fd uintptr) error {
+		if addr.IP.To4() == nil {
+			return syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, dscp)
+		}
+		return syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TOS, dscp<<2)
+	})
 }
 
 // wrapConn wraps a tcpConn in a TCPConn.

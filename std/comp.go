@@ -24,6 +24,7 @@ package std
 
 import (
 	"net"
+	"sync"
 	"time"
 
 	"github.com/golang/snappy"
@@ -32,24 +33,27 @@ import (
 
 // CompStream is a net.Conn wrapper that compresses data using snappy
 type CompStream struct {
-	conn net.Conn
-	w    *snappy.Writer
-	r    *snappy.Reader
+	conn    net.Conn
+	w       *snappy.Writer
+	r       *snappy.Reader
+	readMu  sync.Mutex
+	writeMu sync.Mutex
 }
 
 func (c *CompStream) Read(p []byte) (n int, err error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
 	return c.r.Read(p)
 }
 
 func (c *CompStream) Write(p []byte) (n int, err error) {
-	if _, err := c.w.Write(p); err != nil {
-		return 0, errors.WithStack(err)
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	n, err = c.w.Write(p)
+	if err != nil {
+		return n, errors.WithStack(err)
 	}
-
-	if err := c.w.Flush(); err != nil {
-		return 0, errors.WithStack(err)
-	}
-	return len(p), err
+	return n, nil
 }
 
 func (c *CompStream) Close() error {
@@ -80,7 +84,9 @@ func (c *CompStream) SetWriteDeadline(t time.Time) error {
 func NewCompStream(conn net.Conn) *CompStream {
 	return &CompStream{
 		conn: conn,
-		w:    snappy.NewBufferedWriter(conn),
-		r:    snappy.NewReader(conn),
+		// Each CompStream Write must be immediately visible to smux. The
+		// unbuffered writer also reports completed chunks if a later one fails.
+		w: snappy.NewWriter(conn),
+		r: snappy.NewReader(conn),
 	}
 }

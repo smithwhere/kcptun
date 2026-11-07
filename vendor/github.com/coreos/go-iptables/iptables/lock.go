@@ -35,9 +35,9 @@ type Unlocker interface {
 	Unlock() error
 }
 
-type nopUnlocker struct{}
+type closeOnlyUnlocker struct{ fd int }
 
-func (_ nopUnlocker) Unlock() error { return nil }
+func (u closeOnlyUnlocker) Unlock() error { return syscall.Close(u.fd) }
 
 type fileLock struct {
 	// mu is used to protect against concurrent invocations from within this process
@@ -57,7 +57,8 @@ func (l *fileLock) tryLock() (Unlocker, error) {
 	switch err {
 	case syscall.EWOULDBLOCK:
 		l.mu.Unlock()
-		return nopUnlocker{}, nil
+		// Even without the lock this invocation owns the open descriptor.
+		return closeOnlyUnlocker{fd: l.fd}, nil
 	case nil:
 		return l, nil
 	default:

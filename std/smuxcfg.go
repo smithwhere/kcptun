@@ -32,7 +32,7 @@ import (
 // BuildSmuxConfig constructs a smux.Config from CLI parameters and verifies the
 // result. Callers can log or wrap the returned error for better diagnostics.
 func BuildSmuxConfig(version, maxReceiveBuffer, maxStreamBuffer, maxFrameSize, keepAliveSeconds int) (*smux.Config, error) {
-	if keepAliveSeconds <= 0 || int64(keepAliveSeconds) > int64((1<<63-1)/time.Second) {
+	if keepAliveSeconds <= 0 || int64(keepAliveSeconds) > int64((1<<63-1)/(3*time.Second)) {
 		return nil, fmt.Errorf("keep-alive interval must be positive and within duration range")
 	}
 	cfg := smux.DefaultConfig()
@@ -41,6 +41,9 @@ func BuildSmuxConfig(version, maxReceiveBuffer, maxStreamBuffer, maxFrameSize, k
 	cfg.MaxStreamBuffer = maxStreamBuffer
 	cfg.MaxFrameSize = maxFrameSize
 	cfg.KeepAliveInterval = time.Duration(keepAliveSeconds) * time.Second
+	if minimum := 3 * cfg.KeepAliveInterval; cfg.KeepAliveTimeout < minimum {
+		cfg.KeepAliveTimeout = minimum
+	}
 
 	return cfg, smux.VerifyConfig(cfg)
 }

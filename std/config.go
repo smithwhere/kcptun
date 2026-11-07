@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 // BaseConfig contains shared configuration fields between client and server.
@@ -116,6 +117,15 @@ func ParseJSONConfig(config interface{}, path string) error {
 			return fmt.Errorf("invalid JSON config: multiple JSON values")
 		}
 		return err
+	}
+	return nil
+}
+
+// ValidateCloseWait prevents negative delays and duration overflow.
+func ValidateCloseWait(seconds int) error {
+	const maxSeconds = int64((1<<63 - 1) / time.Second)
+	if seconds < 0 || int64(seconds) > maxSeconds {
+		return fmt.Errorf("closewait must be between 0 and %d seconds", maxSeconds)
 	}
 	return nil
 }

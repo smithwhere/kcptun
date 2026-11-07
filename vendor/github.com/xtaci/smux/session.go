@@ -81,6 +81,7 @@ type writeRequest struct {
 	frame  Frame
 	seq    uint32
 	result chan writeResult
+	state  *atomic.Uint32 // 0 queued, 1 sending, 2 canceled
 }
 
 // writeResult represents the result of a write request
@@ -191,30 +192,39 @@ func (s *Session) OpenStream() (*Stream, error) {
 	s.nextStreamIDLock.Unlock()
 
 	stream := newStream(sid, s.config.MaxFrameSize, s)
-
-	if _, err := s.writeControlFrame(newFrame(byte(s.config.Version), cmdSYN, sid)); err != nil {
-		return nil, err
-	}
-
+	// Register before sending SYN: a peer can reply before the SYN write returns.
 	s.streamLock.Lock()
-	defer s.streamLock.Unlock()
 	select {
 	case <-s.chSocketReadError:
+		s.streamLock.Unlock()
 		return nil, s.socketReadError.Load().(error)
 	case <-s.chSocketWriteError:
+		s.streamLock.Unlock()
 		return nil, s.socketWriteError.Load().(error)
 	case <-s.die:
+		s.streamLock.Unlock()
 		return nil, io.ErrClosedPipe
 	default:
 		s.streams[sid] = stream
-		wrapper := &Stream{stream: stream}
-		// NOTE(x): disabled finalizer for issue #997
-		/*
-			runtime.SetFinalizer(wrapper, func(s *Stream) {
-				s.Close()
-			})
-		*/
-		return wrapper, nil
+	}
+	s.streamLock.Unlock()
+	if _, err := s.writeControlFrame(newFrame(byte(s.config.Version), cmdSYN, sid)); err != nil {
+		stream.sessionClose()
+		s.streamClosed(sid)
+		return nil, err
+	}
+	select {
+	case <-s.chSocketReadError:
+		s.streamClosed(sid)
+		return nil, s.socketReadError.Load().(error)
+	case <-s.chSocketWriteError:
+		s.streamClosed(sid)
+		return nil, s.socketWriteError.Load().(error)
+	case <-s.die:
+		s.streamClosed(sid)
+		return nil, io.ErrClosedPipe
+	default:
+		return &Stream{stream: stream}, nil
 	}
 }
 
@@ -296,6 +306,7 @@ func (s *Session) notifyReadError(err error) {
 		s.socketReadError.Store(err)
 		close(s.chSocketReadError)
 	})
+	s.Close()
 }
 
 func (s *Session) notifyWriteError(err error) {
@@ -303,6 +314,7 @@ func (s *Session) notifyWriteError(err error) {
 		s.socketWriteError.Store(err)
 		close(s.chSocketWriteError)
 	})
+	s.Close()
 }
 
 func (s *Session) notifyProtoError(err error) {
@@ -310,6 +322,7 @@ func (s *Session) notifyProtoError(err error) {
 		s.protoError.Store(err)
 		close(s.chProtoError)
 	})
+	s.Close()
 }
 
 // IsClosed does a safe check to see if we have shutdown
@@ -601,6 +614,9 @@ EVENT_LOOP:
 					s.notifyShaperConsumed()
 					goto EVENT_LOOP
 				}
+				if !request.state.CompareAndSwap(0, 1) {
+					continue
+				}
 
 				buf[0] = request.frame.ver
 				buf[1] = request.frame.cmd
@@ -650,40 +666,55 @@ func (s *Session) writeControlFrame(f Frame) (n int, err error) {
 
 // internal writeFrame version to support deadline used in keepalive
 func (s *Session) writeFrameInternal(f Frame, deadline <-chan time.Time, class CLASSID) (int, error) {
+	n, err, _ := s.writeFrameStatus(f, deadline, class)
+	return n, err
+}
+
+// writeFrameStatus reports whether the sender took ownership of the request.
+func (s *Session) writeFrameStatus(f Frame, deadline <-chan time.Time, class CLASSID) (int, error, bool) {
 	// get result channel from pool
 	resultCh := resultChanPool.Get().(chan writeResult)
 
+	// A timeout can return while the sender is still using the frame.
+	// Never retain a caller-owned buffer beyond the call.
+	if len(f.data) > 0 {
+		f.data = append([]byte(nil), f.data...)
+	}
 	req := writeRequest{
 		class:  class,
 		frame:  f,
 		seq:    atomic.AddUint32(&s.requestID, 1),
 		result: resultCh,
+		state:  new(atomic.Uint32),
 	}
 	select {
 	case s.shaper <- req:
 	case <-s.die:
 		resultChanPool.Put(resultCh)
-		return 0, io.ErrClosedPipe
+		return 0, io.ErrClosedPipe, false
 	case <-s.chSocketWriteError:
 		resultChanPool.Put(resultCh)
-		return 0, s.socketWriteError.Load().(error)
+		return 0, s.socketWriteError.Load().(error), false
 	case <-deadline:
 		resultChanPool.Put(resultCh)
-		return 0, ErrTimeout
+		return 0, ErrTimeout, false
 	}
 
 	select {
 	case result := <-resultCh:
 		resultChanPool.Put(resultCh)
-		return result.n, result.err
+		return result.n, result.err, true
 	case <-s.die:
 		// Cannot recycle channel here - sendLoop may still write to it
-		return 0, io.ErrClosedPipe
+		started := !req.state.CompareAndSwap(0, 2)
+		return 0, io.ErrClosedPipe, started
 	case <-s.chSocketWriteError:
 		// Cannot recycle channel here - sendLoop may still write to it
-		return 0, s.socketWriteError.Load().(error)
+		started := !req.state.CompareAndSwap(0, 2)
+		return 0, s.socketWriteError.Load().(error), started
 	case <-deadline:
 		// Cannot recycle channel here - sendLoop may still write to it
-		return 0, ErrTimeout
+		started := !req.state.CompareAndSwap(0, 2)
+		return 0, ErrTimeout, started
 	}
 }
