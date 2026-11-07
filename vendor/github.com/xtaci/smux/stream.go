@@ -235,7 +235,7 @@ func (s *stream) tryReadV1(b []byte) (n int, err error) {
 	// only when there's no data left in buffer, we return EOF to reader.
 	select {
 	case <-s.die:
-		return 0, io.EOF
+		return 0, s.readTermination()
 	default:
 		return 0, ErrWouldBlock
 	}
@@ -279,14 +279,17 @@ func (s *stream) tryReadV2(b []byte) (n int, err error) {
 
 		// send window update if necessary
 		if notifyConsumed > 0 {
-			return n, s.sendWindowUpdate(notifyConsumed)
+			if err := s.sendWindowUpdate(notifyConsumed); err != nil && !s.sess.IsClosed() {
+				return n, err
+			}
+			return n, nil
 		}
 		return n, nil
 	}
 
 	select {
 	case <-s.die:
-		return 0, io.EOF
+		return 0, s.readTermination()
 	default:
 		return 0, ErrWouldBlock
 	}
@@ -332,6 +335,9 @@ func (s *stream) writeToV1(w io.Writer) (n int64, err error) {
 
 			if ew != nil {
 				return n, ew
+			}
+			if nw != len(buf) {
+				return n, io.ErrShortWrite
 			}
 		} else if ew := s.waitRead(); ew != nil {
 			return n, ew
@@ -380,10 +386,13 @@ func (s *stream) writeToV2(w io.Writer) (n int64, err error) {
 			if ew != nil {
 				return n, ew
 			}
+			if nw != len(buf) {
+				return n, io.ErrShortWrite
+			}
 
 			// send window update
 			if notifyConsumed > 0 {
-				if err := s.sendWindowUpdate(notifyConsumed); err != nil {
+				if err := s.sendWindowUpdate(notifyConsumed); err != nil && !s.sess.IsClosed() {
 					return n, err
 				}
 			}
@@ -412,6 +421,35 @@ func (s *stream) sendWindowUpdate(consumed uint32) error {
 	return err
 }
 
+// readTermination distinguishes a received stream FIN from session failure.
+func (s *stream) readTermination() error {
+	select {
+	case <-s.chFinEvent:
+		return io.EOF
+	default:
+	}
+	select {
+	case <-s.sess.chProtoError:
+		return s.sess.protoError.Load().(error)
+	default:
+	}
+	select {
+	case <-s.sess.chSocketReadError:
+		err := s.sess.socketReadError.Load().(error)
+		if err == io.EOF {
+			return io.ErrUnexpectedEOF
+		}
+		return err
+	default:
+	}
+	select {
+	case <-s.sess.chSocketWriteError:
+		return s.sess.socketWriteError.Load().(error)
+	default:
+	}
+	return io.ErrClosedPipe
+}
+
 // waitRead blocks until a read event occurs or a deadline is reached.
 func (s *stream) waitRead() error {
 	var timer *time.Timer
@@ -434,15 +472,20 @@ func (s *stream) waitRead() error {
 		}
 		return io.EOF
 	case <-s.sess.chSocketReadError:
-		return s.sess.socketReadError.Load().(error)
+	case <-s.sess.chSocketWriteError:
 	case <-s.sess.chProtoError:
-		return s.sess.protoError.Load().(error)
+	case <-s.die:
 	case <-deadline:
 		return ErrTimeout
-	case <-s.die:
-		return io.ErrClosedPipe
 	}
-
+	// Data and failure may arrive together; drain the buffer before reporting it.
+	s.bufferLock.Lock()
+	hasData := s.bufferRing.len() > 0
+	s.bufferLock.Unlock()
+	if hasData {
+		return nil
+	}
+	return s.readTermination()
 }
 
 // checkWriteClosed checks if the stream write side has been closed.
@@ -501,8 +544,12 @@ func (s *stream) writeV1(b []byte) (n int, err error) {
 		}
 
 		frame.data = b[:size]
-		n, err := s.sess.writeFrameInternal(frame, deadline, CLSDATA)
-		atomic.AddUint32(&s.numWritten, uint32(size))
+		n, err, started := s.sess.writeFrameStatus(frame, deadline, CLSDATA)
+		accounted := n
+		if err != nil && started {
+			accounted = size // an in-flight frame may still reach the peer
+		}
+		atomic.AddUint32(&s.numWritten, uint32(accounted))
 		sent += n
 		if err != nil {
 			return sent, err
@@ -589,8 +636,12 @@ func (s *stream) writeV2(b []byte) (n int, err error) {
 				frame.data = bts[:size]
 
 				// transmit of frame
-				nw, err := s.sess.writeFrameInternal(frame, deadline, CLSDATA)
-				atomic.AddUint32(&s.numWritten, uint32(size))
+				nw, err, started := s.sess.writeFrameStatus(frame, deadline, CLSDATA)
+				accounted := nw
+				if err != nil && started {
+					accounted = size // an in-flight frame may still reach the peer
+				}
+				atomic.AddUint32(&s.numWritten, uint32(accounted))
 				sent += nw
 				if err != nil {
 					return sent, err

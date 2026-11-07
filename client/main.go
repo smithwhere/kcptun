@@ -23,6 +23,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha1"
 	"fmt"
 	"io"
@@ -301,6 +302,8 @@ func main() {
 		if config.Conn <= 0 || config.Conn > 65535 {
 			log.Fatal("conn must be between 1 and 65535")
 		}
+		checkError(validateExpiry(config.AutoExpire, config.ScavengeTTL))
+		checkError(std.ValidateCloseWait(config.CloseWait))
 		checkError(std.ValidateFECParams(config.DataShard, config.ParityShard))
 		_, err := std.BuildSmuxConfig(config.SmuxVer, config.SmuxBuf, config.StreamBuf, config.FrameSize, config.KeepAlive)
 		checkError(err)
@@ -425,6 +428,12 @@ func main() {
 		numconn := uint16(config.Conn)
 		muxes := make([]timedSession, numconn)
 		slots := make([]sync.Mutex, numconn)
+		pending := make(chan struct{}, 1024)
+		onDemandDials := make(chan struct{}, 8)
+		slotPending := make([]chan struct{}, numconn)
+		for i := range slotPending {
+			slotPending[i] = make(chan struct{}, 32)
+		}
 		// rr tracks which pre-established session should carry the next client so
 		// short-lived TCP dials do not hammer the same UDP tunnel.
 		rr := uint16(0)
@@ -435,6 +444,10 @@ func main() {
 			_Q_ = qpp.NewQPP([]byte(config.Key), uint16(config.QPPCount))
 		}
 
+		// Keep session slots warm without blocking startup or local requests.
+		go prewarmSessionsWithTimeout(context.Background(), slots, muxes, config.AutoExpire, chScavenger, 5*time.Second, 10*time.Second, func(ctx context.Context) (*smux.Session, error) {
+			return createConnContext(ctx, &config, block)
+		})
 		// Main accept loop: assign each inbound client to a rotating smux session and
 		// refresh sessions on demand so parallel TCP streams keep flowing smoothly.
 		for {
@@ -444,25 +457,38 @@ func main() {
 			}
 			idx := rr % numconn
 			rr = (rr + 1) % numconn
-			dispatchSlot(&slots[idx], p1, func() {
+			dispatchSlot(&slots[idx], pending, slotPending[idx], 10*time.Second, p1, func(ctx context.Context) {
 
 				// Refresh the selected session if it is missing, closed, or past its TTL.
 				if muxes[idx].session == nil || muxes[idx].session.IsClosed() ||
 					(config.AutoExpire > 0 && time.Now().After(muxes[idx].expiryDate)) {
-					session, err := createConn(&config, block)
+					session, err := createSessionBounded(ctx, onDemandDials, func(dialCtx context.Context) (*smux.Session, error) {
+						return createConnContext(dialCtx, &config, block)
+					})
 					if err != nil {
 						log.Println("connect:", err)
-						p1.Close()
 						return
 					}
-					muxes[idx].session = session
-					muxes[idx].expiryDate = time.Now().Add(time.Duration(config.AutoExpire) * time.Second)
-					if config.AutoExpire > 0 { // only track TTL when auto-expiration is enabled
-						chScavenger <- muxes[idx]
+					created := timedSession{session: session, expiryDate: time.Now().Add(time.Duration(config.AutoExpire) * time.Second)}
+					if config.AutoExpire > 0 {
+						select {
+						case chScavenger <- created:
+						case <-ctx.Done():
+							go session.Close()
+							return
+						}
 					}
+					if ctx.Err() != nil {
+						go session.Close()
+						return
+					}
+					muxes[idx] = created
 				}
 
 				// Serve the accepted client in its own goroutine to keep the accept loop responsive.
+				if !claimConnection(ctx) {
+					return
+				}
 				go handleClient(_Q_, []byte(config.Key), muxes[idx].session, p1, config.Quiet, config.CloseWait)
 			})
 		}
@@ -473,7 +499,13 @@ func main() {
 // createConn establishes a fresh KCP connection with all tunables applied and
 // then upgrades it into an smux session ready for multiplexing.
 func createConn(config *Config, block kcp.BlockCrypt) (*smux.Session, error) {
-	kcpconn, err := dial(config, block)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return createConnContext(ctx, config, block)
+}
+
+func createConnContext(ctx context.Context, config *Config, block kcp.BlockCrypt) (*smux.Session, error) {
+	kcpconn, err := dialContext(ctx, config, block)
 	if err != nil {
 		return nil, errors.Wrap(err, "dial()")
 	}

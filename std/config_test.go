@@ -25,7 +25,9 @@ package std
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func TestBaseConfigApplyMode(t *testing.T) {
@@ -149,5 +151,25 @@ func TestParseJSONConfigAllowsTrailingWhitespace(t *testing.T) {
 	}
 	if config.MTU != 1350 {
 		t.Fatalf("unexpected MTU %d", config.MTU)
+	}
+}
+
+func TestValidateCloseWaitBounds(t *testing.T) {
+	for _, seconds := range []int{0, 1, 30} {
+		if err := ValidateCloseWait(seconds); err != nil {
+			t.Fatalf("%d: %v", seconds, err)
+		}
+	}
+	if err := ValidateCloseWait(-1); err == nil {
+		t.Fatal("negative closewait accepted")
+	}
+	if strconv.IntSize == 64 {
+		max := int64((1<<63 - 1) / time.Second)
+		if err := ValidateCloseWait(int(max)); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateCloseWait(int(max + 1)); err == nil {
+			t.Fatal("overflowing closewait accepted")
+		}
 	}
 }

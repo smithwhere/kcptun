@@ -17,7 +17,8 @@ func TestCompStreamRoundTrip(t *testing.T) {
 		compReader.Close()
 	})
 
-	payload := bytes.Repeat([]byte("compressed payload"), 64)
+	// Exercise more than one Snappy block, including the final partial block.
+	payload := bytes.Repeat([]byte("compressed payload"), 8192)
 	readErr := make(chan error, 1)
 
 	go func() {

@@ -25,6 +25,7 @@
 package tcpraw
 
 import (
+	"context"
 	"errors"
 	"net"
 )
@@ -34,6 +35,13 @@ type TCPConn struct{ *net.UDPConn }
 // Dial connects to the remote TCP port,
 // and returns a single packet-oriented connection
 func Dial(network, address string) (*TCPConn, error) {
+	return nil, errors.New("os not supported")
+}
+
+func DialContext(ctx context.Context, network, address string) (*TCPConn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return nil, errors.New("os not supported")
 }
 

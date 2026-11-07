@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"sync"
 
 	"github.com/xtaci/qpp"
 )
@@ -64,6 +65,9 @@ func ValidateQPPParams(count int, key string) ([]string, error) {
 type QPPPort struct {
 	underlying io.ReadWriteCloser // io.Writer is not enough, we need to close the underlying writer as well
 
+	readMu  sync.Mutex
+	writeMu sync.Mutex
+
 	pad   *qpp.QuantumPermutationPad
 	wprng *qpp.Rand
 	rprng *qpp.Rand
@@ -79,15 +83,36 @@ func NewQPPPort(underlying io.ReadWriteCloser, pad *qpp.QuantumPermutationPad, s
 }
 
 func (r *QPPPort) Read(p []byte) (n int, err error) {
+	r.readMu.Lock()
+	defer r.readMu.Unlock()
 	n, err = r.underlying.Read(p)
 	r.pad.DecryptWithPRNG(p[:n], r.rprng)
 	return
 }
 
 func (r *QPPPort) Write(p []byte) (n int, err error) {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	// Commit the PRNG state only for bytes accepted by the underlying writer.
+	// This keeps a retry of a partial write aligned with the peer.
 	ciphertext := append([]byte(nil), p...)
-	r.pad.EncryptWithPRNG(ciphertext, r.wprng)
-	return r.underlying.Write(ciphertext)
+	next := *r.wprng
+	r.pad.EncryptWithPRNG(ciphertext, &next)
+	n, err = r.underlying.Write(ciphertext)
+	if n < 0 || n > len(p) {
+		return 0, fmt.Errorf("invalid underlying write count: %d", n)
+	}
+	if n == len(p) {
+		*r.wprng = next
+	} else {
+		// Encrypting the prefix advances the original state by exactly n bytes.
+		prefix := append([]byte(nil), p[:n]...)
+		r.pad.EncryptWithPRNG(prefix, r.wprng)
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+	}
+	return n, err
 }
 
 func (r *QPPPort) Close() error {

@@ -285,6 +285,7 @@ func main() {
 			err := parseJSONConfig(&config, c.String("c"))
 			checkError(err)
 		}
+		checkError(std.ValidateCloseWait(config.CloseWait))
 		checkError(std.ValidateFECParams(config.DataShard, config.ParityShard))
 		_, err := std.BuildSmuxConfig(config.SmuxVer, config.SmuxBuf, config.StreamBuf, config.FrameSize, config.KeepAlive)
 		checkError(err)
@@ -379,6 +380,24 @@ func main() {
 
 		// Spawn an accept loop per listener and track each goroutine via WaitGroup.
 		var wg sync.WaitGroup
+		var listeners []io.Closer
+		defer func() {
+			if err := closeListeners(listeners); err != nil {
+				log.Printf("listener cleanup: %v", err)
+			}
+			wg.Wait()
+		}()
+		listenerErrors := make(chan error, 1)
+		startListener := func(lis *kcp.Listener) {
+			wg.Add(1)
+			go func() {
+				err := serveListener(lis, _Q_, &config, &wg)
+				select {
+				case listenerErrors <- err:
+				default:
+				}
+			}()
+		}
 
 		// Parse the listen address which may contain a port range.
 		mp, err := std.ParseMultiPort(config.Listen)
@@ -392,35 +411,38 @@ func main() {
 			listenAddr := fmt.Sprintf("%v:%v", mp.Host, port)
 			if config.TCP { // optionally expose a tcpraw listener alongside UDP
 				if conn, err := tcpraw.Listen("tcp", listenAddr); err == nil {
+					listeners = append(listeners, conn)
 					log.Printf("Listening on: %v/tcp", listenAddr)
 					lis, err := kcp.ServeConn(block, config.DataShard, config.ParityShard, conn)
-					checkError(err)
-					wg.Add(1)
-					go serveListener(lis, _Q_, &config, &wg)
+					if err != nil {
+						return fmt.Errorf("tcp KCP listener %s: %w", listenAddr, err)
+					}
+					listeners = append(listeners, lis)
+					startListener(lis)
 				} else {
-					log.Println(err)
+					return fmt.Errorf("tcp listener %s: %w", listenAddr, err)
 				}
 			}
 
 			// Always stand up the UDP listener; this is the default transport.
 			log.Printf("Listening on: %v/udp", listenAddr)
 			lis, err := kcp.ListenWithOptions(listenAddr, block, config.DataShard, config.ParityShard)
-			checkError(err)
-			wg.Add(1)
-			go serveListener(lis, _Q_, &config, &wg)
+			if err != nil {
+				return fmt.Errorf("udp listener %s: %w", listenAddr, err)
+			}
+			listeners = append(listeners, lis)
+			startListener(lis)
 		}
 
-		wg.Wait()
-		return nil
+		return <-listenerErrors
 	}
 	checkError(myApp.Run(os.Args))
 }
 
 // serveListener drains incoming KCP conversations from lis and dispatches each
 // one to handleMux while keeping wg accounting balanced.
-func serveListener(lis *kcp.Listener, _Q_ *qpp.QuantumPermutationPad, config *Config, wg *sync.WaitGroup) {
+func serveListener(lis *kcp.Listener, _Q_ *qpp.QuantumPermutationPad, config *Config, wg *sync.WaitGroup) error {
 	defer wg.Done()
-	defer lis.Close()
 	if err := lis.SetDSCP(config.DSCP); err != nil {
 		log.Println("SetDSCP:", err)
 	}
@@ -439,7 +461,7 @@ func serveListener(lis *kcp.Listener, _Q_ *qpp.QuantumPermutationPad, config *Co
 			log.Printf("%+v", err)
 			// KCP stops its monitor and latches socket read errors. Retrying
 			// AcceptKCP cannot recover this listener, even for a temporary error.
-			return
+			return fmt.Errorf("listener %v: %w", lis.Addr(), err)
 		}
 		log.Println("remote address:", conn.RemoteAddr())
 		conn.SetStreamMode(true)

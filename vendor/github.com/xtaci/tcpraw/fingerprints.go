@@ -38,9 +38,9 @@ var fingerPrintLinux = fingerPrint{
 	Type:   TypeLinux,
 	Window: 65535,
 	Options: []layers.TCPOption{
-		{1, 0, nil},
-		{1, 0, nil},
-		{8, 10, make([]byte, 10)}, // len = 10
+		{OptionType: 1},
+		{OptionType: 1},
+		{OptionType: 8, OptionLength: 10, OptionData: make([]byte, 8)},
 	},
 	TTL: 64,
 }
@@ -50,12 +50,21 @@ var defaultFingerPrint = fingerPrintLinux
 func init() {
 }
 
+func timestampValue(options []layers.TCPOption) (uint32, bool) {
+	for _, opt := range options {
+		if opt.OptionType == layers.TCPOptionKindTimestamps && len(opt.OptionData) == 8 {
+			return binary.BigEndian.Uint32(opt.OptionData[:4]), true
+		}
+	}
+	return 0, false
+}
+
 func makeOption(optType FingerPrintType, options []layers.TCPOption, tsecr uint32) {
 	switch optType {
 	case TypeLinux:
 		// Timestamps: Kind 8, Length 10
 		for i := range options {
-			if options[i].OptionType == 8 && len(options[i].OptionData) == 10 {
+			if options[i].OptionType == 8 && len(options[i].OptionData) == 8 {
 				// Use milliseconds for timestamp to be more realistic (RFC 7323)
 				nowMillis := time.Now().UnixNano() / 1e6
 				binary.BigEndian.PutUint32(options[i].OptionData[:4], uint32(nowMillis))

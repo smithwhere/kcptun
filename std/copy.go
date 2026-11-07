@@ -70,49 +70,121 @@ type closeWriter interface {
 // It uses CloseWrite() for half-close to allow graceful shutdown:
 // when one direction finishes, it signals the peer that no more data will be sent,
 // while still allowing data to be received from the other direction.
-func Pipe(alice, bob io.ReadWriteCloser, closeWait int) (errA, errB error) {
-	var wg sync.WaitGroup
-	wg.Add(2)
+// progressWriter reports successful writes without blocking the data path.
+type progressWriter struct {
+	dst      io.Writer
+	progress chan<- struct{}
+}
 
-	streamCopy := func(dst io.ReadWriteCloser, src io.ReadWriteCloser, err *error) {
-		defer wg.Done()
-
-		// write error directly to the *pointer
-		_, *err = Copy(dst, src)
-
-		// A failed direction cannot complete a graceful half-close.
-		// Close both ends to unblock the other copy immediately.
-		if *err != nil && !errors.Is(*err, io.EOF) {
-			alice.Close()
-			bob.Close()
-			return
-		}
-
-		if closeWait > 0 {
-			time.Sleep(time.Duration(closeWait) * time.Second)
-		}
-
-		// half-close: signal the peer that we are done writing
-		// use CloseWrite if available, otherwise fall back to Close
-		if cw, ok := dst.(closeWriter); ok {
-			cw.CloseWrite()
-		} else {
-			dst.Close()
+func (w progressWriter) Write(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	if n > 0 {
+		select {
+		case w.progress <- struct{}{}:
+		default:
 		}
 	}
+	return n, err
+}
 
-	// start bidirectional stream copying
-	// alice -> bob: read from alice, write to bob
-	// bob -> alice: read from bob, write to alice
-	go streamCopy(bob, alice, &errA) // alice->bob direction
-	go streamCopy(alice, bob, &errB) // bob->alice direction
-
-	// wait for both direction to close
+func Pipe(alice, bob io.ReadWriteCloser, closeWait int) (errA, errB error) {
+	var wg sync.WaitGroup
+	var failureOnce sync.Once
+	var closeAOnce, closeBOnce sync.Once
+	closedA, closedB := make(chan struct{}), make(chan struct{})
+	closeA := func() { closeAOnce.Do(func() { go func() { defer close(closedA); alice.Close() }() }) }
+	closeB := func() { closeBOnce.Do(func() { go func() { defer close(closedB); bob.Close() }() }) }
+	abort, finished := make(chan struct{}), make(chan struct{})
+	failed := make(chan int, 1)
+	progress := [2]chan struct{}{make(chan struct{}, 1), make(chan struct{}, 1)}
+	// After a failure, interrupt only after the reverse copy makes no write
+	// progress for one second. A healthy slow drain may continue indefinitely.
+	go func() {
+		select {
+		case direction := <-failed:
+			timer := time.NewTimer(time.Second)
+			defer timer.Stop()
+			for {
+				select {
+				case <-finished:
+					return
+				case <-progress[1-direction]:
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					timer.Reset(time.Second)
+				case <-timer.C:
+					closeA()
+					closeB()
+					return
+				}
+			}
+		case <-finished:
+			return
+		}
+	}()
+	wg.Add(2)
+	streamCopy := func(direction int, dst, src io.ReadWriteCloser, result *error) {
+		defer wg.Done()
+		_, *result = Copy(progressWriter{dst: dst, progress: progress[direction]}, src)
+		if *result != nil && !errors.Is(*result, io.EOF) {
+			failureOnce.Do(func() { close(abort); failed <- direction })
+			return
+		}
+		if closeWait > 0 {
+			timer := time.NewTimer(time.Duration(closeWait) * time.Second)
+			select {
+			case <-timer.C:
+			case <-abort:
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}
+		// Half-close may block independently of Close. Never let it prevent
+		// shutdown after the opposite direction has failed.
+		halfClosed := make(chan error, 1)
+		go func() {
+			if cw, ok := dst.(closeWriter); ok {
+				halfClosed <- cw.CloseWrite()
+			} else {
+				halfClosed <- dst.Close()
+			}
+		}()
+		select {
+		case halfErr := <-halfClosed:
+			if halfErr != nil {
+				*result = halfErr
+				failureOnce.Do(func() { close(abort); failed <- direction })
+			}
+		case <-abort:
+		}
+	}
+	go streamCopy(0, bob, alice, &errA)
+	go streamCopy(1, alice, bob, &errB)
 	wg.Wait()
-
-	// fully close both connections after both directions are done
-	alice.Close()
-	bob.Close()
-
+	close(finished)
+	closeA()
+	closeB()
+	// Do not let a stalled Close prevent the other endpoint from being closed.
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	a, b := closedA, closedB
+	for a != nil || b != nil {
+		select {
+		case <-a:
+			a = nil
+		case <-b:
+			b = nil
+		case <-timer.C:
+			return
+		}
+	}
 	return
 }
